@@ -11,14 +11,17 @@
 | 流程编排（Plan-First） | `brainstorming` / `idea-refine`、`writing-plans`、`planning-and-task-breakdown`、`subagent-driven-development`、`incremental-implementation`、`using-git-worktrees` | 探索→规划→实现→验证固定节奏 + 并行化 |
 | 自动化护栏 | `tdd` / `test-driven-development`、`verification-before-completion`、`code-review` / `requesting-code-review` / `receiving-code-review`、`git-workflow-and-versioning`、`finishing-a-development-branch` | Lint/单测/编译阻断、独立评审、回滚、PR 闸门 |
 
-## 标准组合（新功能落地时这么走）
+## 标准组合（非平凡功能落地时这么走；小型变更走快路径，见 flow.md）
 
 1. `brainstorming` / `idea-refine` —— 先把模糊需求问清楚
-2. `spec-driven-development` —— 产出结构化 spec（单一真相源）
-3. `writing-plans` + `planning-and-task-breakdown` —— spec 转可验收实施计划与任务清单
+2. `writing-plans` —— 产出结构化 spec / plan（单一真相源）
+3. `writing-plans` + `executing-plans` —— plan 转可验收实施计划与任务清单
 4. `subagent-driven-development`（配合 `using-git-worktrees`）—— 并行隔离执行
-5. `tdd` + `verification-before-completion` —— 测试先行、完成前强制校验
-6. `code-review` —— 独立评审闸门，再 `finishing-a-development-branch` 收口
+5. `test-driven-development` + `verification-before-completion` —— 测试先行、完成前强制校验
+6. `requesting-code-review` / `receiving-code-review` —— 独立评审闸门，再 `finishing-a-development-branch` 收口
+
+> 注：`spec-driven-development` / `planning-and-task-breakdown` / `tdd` 是更专的同类 skill，
+> 但本套配置未启用（在 `disabled/`），上面统一改用已启用的等价 skill，避免流程指向失效技能。
 
 ## 缺口与本套件的补位
 

@@ -76,6 +76,41 @@ def check_agents_md(repo):
     return issues
 
 
+KNOWN_BAD_SKILL_REFS = {
+    "spec-driven-development", "planning-and-task-breakdown", "tdd", "code-review",
+}
+
+def _skill_names(repo):
+    names = set()
+    for d in ("skills", "skills-optional"):
+        p = os.path.join(repo, d)
+        if os.path.isdir(p):
+            for n in os.listdir(p):
+                if os.path.isdir(os.path.join(p, n)):
+                    names.add(n)
+    return names
+
+def check_skill_refs(repo):
+    """flow.md / AGENTS.md 里引用的 skill 必须真实存在（已启用或在 skills-optional 按需库）。
+    防止指向未启用/不存在 skill 的硬冲突——这类 bug 以前 doctor 抓不到。"""
+    known = _skill_names(repo)
+    issues = []
+    for fn in ("flow.md", "AGENTS.md"):
+        fp = os.path.join(repo, fn)
+        if not os.path.isfile(fp):
+            continue
+        with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+        for bad in KNOWN_BAD_SKILL_REFS:
+            if "`%s`" % bad in text:
+                issues.append(f"{fn}: 含已禁用/不存在的 skill 引用 `{bad}`")
+        for m in re.finditer(r"`([a-z0-9]+(?:-[a-z0-9]+)+)`", text):
+            tok = m.group(1)
+            if tok not in known:
+                issues.append(f"{fn}: 引用了疑似未启用/不存在的 skill `{tok}`")
+    return issues
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--canonical", required=True)
@@ -92,6 +127,12 @@ def main():
         print(f"  [!] {i}")
     if not check_agents_md(args.canonical):
         print("  [ok] 长度与命令检查通过")
+
+    print("\n== skill 引用完整性 ==")
+    for i in check_skill_refs(args.canonical):
+        print(f"  [!] {i}")
+    if not check_skill_refs(args.canonical):
+        print("  [ok] flow.md / AGENTS.md 引用的 skill 均存在")
 
     print("\n== 泄密扫描 ==")
     hits = check_secrets(args.canonical)
