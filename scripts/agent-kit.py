@@ -287,7 +287,14 @@ def cmd_init(args):
         servers = data.get("mcpServers", {})
         masked = {}
         for sname, sdef in servers.items():
-            env = sdef.get("env", {})
+            # WorkBuddy 的 mcp.json 里 sdef 可能是 Python repr 字符串，需转 dict
+            if isinstance(sdef, str):
+                import ast
+                try:
+                    sdef = ast.literal_eval(sdef)
+                except Exception:
+                    continue
+            env = sdef.get("env", {}) or {}
             masked[sname] = {
                 "command": sdef.get("command"),
                 "args": sdef.get("args"),
@@ -661,32 +668,43 @@ def cmd_check(args):
         fp = os.path.join(canonical, f)
         result["required_files"].append({"file": f, "exists": os.path.exists(fp)})
 
-    # --tool 时附带 drift 检测
+    # --tool 时附带 drift 检测（skill 目录级对比）
     if getattr(args, "tool", None):
         manifest = _load_manifest(canonical)
-        canonical_files = _scan_files(canonical)
         tool_dir = TOOL_DIRS[args.tool]
+        src_skills = os.path.join(canonical, "skills")
         dst_skills = os.path.join(tool_dir, "skills")
         synced = drifted = missing = extra = 0
+
+        # canonical 侧的 skill 名集合
+        canon_skills = set()
+        if os.path.isdir(src_skills):
+            canon_skills = {n for n in os.listdir(src_skills)
+                           if os.path.isdir(os.path.join(src_skills, n)) and n != "disabled"}
+
+        # 工具侧的 skill 名集合
+        tool_skills = set()
         if os.path.isdir(dst_skills):
-            for name in os.listdir(dst_skills):
-                dst = os.path.join(dst_skills, name)
-                if not os.path.isdir(dst) or name == "disabled":
-                    continue
-                ck = "skills/%s" % name
-                if ck not in canonical_files:
-                    extra += 1
+            tool_skills = {n for n in os.listdir(dst_skills)
+                          if os.path.isdir(os.path.join(dst_skills, n)) and n != "disabled" and n != ".system"}
+
+        # 对比
+        for name in canon_skills | tool_skills:
+            in_canon = name in canon_skills
+            in_tool = name in tool_skills
+            if in_canon and in_tool:
+                # 两侧都有：对比目录 hash
+                src_h = _dir_hash(os.path.join(src_skills, name))
+                dst_h = _dir_hash(os.path.join(dst_skills, name))
+                if src_h == dst_h:
+                    synced += 1
                 else:
-                    dst_hash = _dir_hash(dst)
-                    if dst_hash == manifest.get("files", {}).get(ck, ""):
-                        synced += 1
-                    else:
-                        drifted += 1
-            for name in canonical_files:
-                if name.startswith("skills/"):
-                    sname = name.split("/", 1)[1].split("/")[0]
-                    if not os.path.isdir(os.path.join(dst_skills, sname)):
-                        missing += 1
+                    drifted += 1
+            elif in_canon and not in_tool:
+                missing += 1
+            elif in_tool and not in_canon:
+                extra += 1
+
         result["drift"] = {
             "tool": args.tool,
             "synced": synced, "drifted": drifted,

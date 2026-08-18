@@ -101,7 +101,9 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 3. 流程按任务规模分级：小型变更走快路径，非平凡功能走完整 Pipeline。
 
 ### 模式 C · migrate（可携带环境迁移）
-完全由五命令覆盖（见上方"agent 操作手册"）。`scan_env.py --materialize` 等价于 `agent-kit.py init`。
+完全由五命令覆盖（见上方"agent 操作手册"）。`agent-kit.py init` 从当前环境快照生成 canonical。
+
+> 注：`bootstrap.py` / `doctor.py` / `scan_env.py` 已废弃，功能合并进 `agent-kit.py`，仅保留向后兼容。统一用 `agent-kit.py`。
 
 ## 何时读什么（渐进披露）
 

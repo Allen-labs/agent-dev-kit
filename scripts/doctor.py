@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""doctor.py - 体检：canonical 健康度 / 可迁移性 / 是否泄密 / 与工具层 drift。
+"""[DEPRECATED] doctor.py — 已被 agent-kit.py check 取代。
+
+本脚本功能（canonical 体检 + 泄密扫描 + skill 引用校验）已完全合并进
+`agent-kit.py check --canonical <path> [--tool <tool>]`。
+请使用 agent-kit.py，本文件仅保留向后兼容。
+
+体检：canonical 健康度 / 可迁移性 / 是否泄密 / 与工具层 drift。
 
 用法：
   python doctor.py --canonical /path/to/canonical

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""scan_env.py - 扫描当前 WorkBuddy 环境，导出 canonical 报告。
+"""[DEPRECATED] scan_env.py — 已被 agent-kit.py init 取代。
+
+本脚本功能（扫描环境 + materialize canonical）已完全合并进
+`agent-kit.py init <path>`（初始化 canonical 仓库）。
+请使用 agent-kit.py，本文件仅保留向后兼容。
+
+扫描当前 WorkBuddy 环境，导出 canonical 报告。
 
 提取：已安装的 skills、mcp.json 里的 server 定义（密钥一律屏蔽）。
 用法：

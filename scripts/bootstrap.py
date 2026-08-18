@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""bootstrap.py - 把 canonical 仓库扇出到目标工具目录。
+"""[DEPRECATED] bootstrap.py — 已被 agent-kit.py apply 取代。
+
+本脚本功能（canonical → 工具扇出 + MCP 翻译）已完全合并进
+`agent-kit.py apply --canonical <path> --tool <tool> [--write]`。
+请使用 agent-kit.py，本文件仅保留向后兼容。
 
 把唯一真相源（canonical）的配置复制/symlink 到目标工具的目录，并把
 MCP 定义翻译成目标格式。默认 dry-run，加 --write 才落盘。
