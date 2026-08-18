@@ -167,7 +167,7 @@ def _inject_env_dict(d, env):
 
 def _mcp_to_toml(servers):
     """Codex TOML 格式（env 值已注入真实密钥，不再有 ${}）。"""
-    lines = ["[mcp_servers]"]
+    lines = []
     for name, sdef in servers.items():
         lines.append(f"[mcp_servers.{name}]")
         lines.append(f'command = "{sdef.get("command")}"')
@@ -176,7 +176,59 @@ def _mcp_to_toml(servers):
         if sdef.get("env"):
             env_items = ", ".join(f'{k} = "{v}"' for k, v in sdef["env"].items())
             lines.append(f"env = {{ {env_items} }}")
-    return "\n".join(lines) + "\n"
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _merge_toml(dst, new_sections, args, plan, label):
+    """把 new_sections（[mcp_servers.xxx] 段）合并到已有 config.toml，不破坏现有内容。
+    已有的同名 section（含子段如 [mcp_servers.xxx.env]）先删除再追加。"""
+    existing = ""
+    if os.path.exists(dst):
+        if not args.force and not getattr(args, "upgrade", False):
+            plan["skipped"].append(label + " (exists)")
+            return
+        try:
+            with open(dst, "r", encoding="utf-8") as f:
+                existing = f.read()
+        except Exception:
+            existing = ""
+        if getattr(args, "upgrade", False):
+            _backup(dst)
+        elif args.force:
+            _backup(dst)
+    # 解析 new_sections 里要推的 server 名
+    new_names = set(re.findall(r"^\[mcp_servers\.([^.\]]+)\]", new_sections, re.MULTILINE))
+    # 从 existing 里删除同名旧 section（含子段 [mcp_servers.xxx.env]）
+    lines = existing.split("\n")
+    result = []
+    skip_prefix = None  # 正在跳过的 server 名
+    for line in lines:
+        m = re.match(r"^\[mcp_servers\.([^.\]]+)\]", line)
+        if m:
+            name = m.group(1)
+            if name in new_names:
+                skip_prefix = name
+                continue
+            else:
+                skip_prefix = None
+                result.append(line)
+                continue
+        if skip_prefix:
+            # 跳过子段（如 [mcp_servers.xxx.env]）和 section 内容
+            if line.startswith("[") and not line.startswith("[mcp_servers.%s" % skip_prefix):
+                skip_prefix = None
+                result.append(line)
+            continue
+        result.append(line)
+    cleaned = "\n".join(result).rstrip()
+    if cleaned:
+        cleaned += "\n\n"
+    content = cleaned + new_sections.strip() + "\n"
+    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+    with open(dst, "w", encoding="utf-8") as f:
+        f.write(content)
+    plan["modified"].append(label)
 
 
 def _instruction_file(tool, canonical):
@@ -334,7 +386,7 @@ def cmd_push(args):
         if tool == "codex":
             mcp_dst = os.path.join(tool_dir, "config.toml")
             content = _mcp_to_toml(translated)
-            _write_or_backup(mcp_dst, content, args, plan, "mcp/config.toml")
+            _merge_toml(mcp_dst, content, args, plan, "mcp/config.toml")
         elif tool == "opencode":
             _merge_json_file(os.path.join(tool_dir, "opencode.json"),
                              "mcp", translated, args, plan, "mcp/opencode.json")
