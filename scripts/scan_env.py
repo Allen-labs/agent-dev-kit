@@ -101,13 +101,19 @@ def materialize(dest):
         json.dump(servers, f, indent=2, ensure_ascii=False)
     print(f"  mcp/mcp.servers.json ({len(servers)} 个 server，密钥已占位) -> {mcp_dir}")
 
-    # flow.md / user.md / adapters 从 assets 模板复制
+    # flow.md / AGENTS.md / user.md / adapters 从 assets 模板复制
     src_flow = os.path.join(ASSETS_DIR, "agents-dir", "memory", "flow.md")
     if os.path.exists(src_flow):
         shutil.copy(src_flow, os.path.join(dest, "flow.md"))
         print(f"  flow.md -> {dest}")
-    with open(os.path.join(dest, "user.md"), "w", encoding="utf-8") as f:
-        f.write("# User\n\n[个人偏好、常用约定、城市/时区等]\n")
+    src_agents = os.path.join(ASSETS_DIR, "AGENTS.personal.md")
+    if os.path.exists(src_agents):
+        shutil.copy(src_agents, os.path.join(dest, "AGENTS.md"))
+        print(f"  AGENTS.md (个人级宪法) -> {dest}")
+    src_user = os.path.join(ASSETS_DIR, "user.md")
+    if os.path.exists(src_user):
+        shutil.copy(src_user, os.path.join(dest, "user.md"))
+        print(f"  user.md -> {dest}")
     adir = os.path.join(ASSETS_DIR, "adapters")
     if os.path.isdir(adir):
         dst_ad = os.path.join(dest, "adapters")
