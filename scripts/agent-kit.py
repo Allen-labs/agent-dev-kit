@@ -359,8 +359,9 @@ def cmd_push(args):
             key = "skills/%s" % name
             src_hash = current.get(key, "")
             dst_hash = manifest.get("files", {}).get(key, "")
-            # 幂等：canonical 没变 + 工具已有 → skip
-            if src_hash == dst_hash and os.path.isdir(dst):
+            # 幂等：canonical 没变 + 工具目录真实存在 → skip
+            # 防御：即使 manifest 说已同步，文件可能被删了 → 检查 isdir
+            if src_hash == dst_hash and os.path.isdir(dst) and os.listdir(dst):
                 plan["skipped"].append(key)
                 continue
             # 工具已有但 canonical 变了 → upgrade 模式覆盖，普通模式 skip
