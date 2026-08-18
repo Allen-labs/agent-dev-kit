@@ -80,7 +80,14 @@ def materialize(dest):
         src = s["path"]
         d = os.path.join(dst_skills, s["name"])
         if os.path.isdir(src):
-            shutil.copytree(src, d)
+            # 排除 .git 等 VCS 元数据：canonical 应是纯文件树，
+            # 否则子 skill 内的 .git 会被外层仓库当成嵌套仓库(gitlink)，
+            # 内容进不去，跨机器克隆后变成空指针。
+            shutil.copytree(
+                src, d,
+                ignore=shutil.ignore_patterns(".git", ".gitmodules", ".svn", ".hg"),
+                symlinks=False,
+            )
             n += 1
     print(f"  skills/  ({n} 个) -> {dst_skills}")
 
