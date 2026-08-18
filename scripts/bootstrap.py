@@ -21,6 +21,8 @@ TOOL_DIRS = {
     "claude": os.path.join(HOME, ".claude"),
     "cursor": os.path.join(HOME, ".cursor"),
     "codex": os.path.join(HOME, ".codex"),
+    "opencode": os.path.join(HOME, ".config", "opencode"),
+    "zed": os.path.join(HOME, ".config", "zed"),
 }
 
 
@@ -45,7 +47,60 @@ def translate_mcp(servers, tool):
                 "env": {k: f"${{{k}}}" for k in sdef.get("env", {}).keys()},
             }
         return out
+    if tool == "opencode":
+        # OpenCode: command 是数组（npx+参数合并），env 键叫 environment
+        out = {}
+        for name, sdef in servers.items():
+            cmd = [sdef.get("command")] + list(sdef.get("args", []))
+            out[name] = {
+                "type": "local",
+                "command": cmd,
+                "enabled": True,
+                "environment": {k: f"${{{k}}}" for k in sdef.get("env", {}).keys()},
+            }
+        return out
+    if tool == "zed":
+        # Zed: command 是字符串，键叫 context_servers
+        out = {}
+        for name, sdef in servers.items():
+            out[name] = {
+                "command": sdef.get("command"),
+                "args": sdef.get("args", []),
+                "env": {k: f"${{{k}}}" for k in sdef.get("env", {}).keys()},
+            }
+        return out
     return {"mcpServers": servers}
+
+
+def _write_file(dst, content, args):
+    """写入文件：存在且非 --force 则跳过；否则先备份再写。"""
+    if os.path.exists(dst) and not args.force:
+        print(f"  skip (exists, --force to overwrite): {dst}")
+        return
+    if os.path.exists(dst):
+        bak = dst + ".bak." + str(int(os.path.getmtime(dst)))
+        shutil.copy(dst, bak)
+        print(f"  backup -> {bak}")
+    with open(dst, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"  wrote -> {dst}")
+
+
+def _merge_json(dst, key, obj, args):
+    """把 obj 合并进已有 JSON 的 key 下（保留其他键），写入前备份。"""
+    existing = {}
+    if os.path.exists(dst):
+        if not args.force:
+            print(f"  skip merge (exists, --force to merge): {dst}")
+            return
+        try:
+            with open(dst, encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            existing = {}
+    existing[key] = obj
+    content = json.dumps(existing, indent=2, ensure_ascii=False)
+    _write_file(dst, content, args)
 
 
 def main():
@@ -69,16 +124,23 @@ def main():
         dst_skills = os.path.join(tool_dir, "skills")
         plan.append((f"skills/ -> {dst_skills}", "dir"))
 
-    # mcp
+    # mcp（计划阶段确定目标文件与格式）
     servers = load_canonical_mcp(args.canonical)
+    mcp_dst = None
     if servers is not None:
-        translated = translate_mcp(servers, args.tool)
         if args.tool == "codex":
-            dst_mcp = os.path.join(tool_dir, "config.toml")
-            plan.append((f"mcp -> {dst_mcp} (TOML)", "file"))
+            mcp_dst = os.path.join(tool_dir, "config.toml")
+            mcp_label = "TOML"
+        elif args.tool == "opencode":
+            mcp_dst = os.path.join(tool_dir, "opencode.json")
+            mcp_label = "JSON(merge 'mcp')"
+        elif args.tool == "zed":
+            mcp_dst = os.path.join(tool_dir, "settings.json")
+            mcp_label = "JSON(merge 'context_servers')"
         else:
-            dst_mcp = os.path.join(tool_dir, "mcp.json")
-            plan.append((f"mcp -> {dst_mcp} (JSON)", "file"))
+            mcp_dst = os.path.join(tool_dir, "mcp.json")
+            mcp_label = "JSON"
+        plan.append((f"mcp -> {mcp_dst} ({mcp_label})", "file"))
 
     # AGENTS.md / CLAUDE.md 薄适配器
     if args.tool == "claude":
@@ -129,20 +191,14 @@ def main():
                     env_str = ", ".join(f'{k} = "{v}"' for k, v in sdef["env"].items())
                     lines.append(f"env = {{ {env_str} }}")
             content = "\n".join(lines) + "\n"
+            _write_file(dst_mcp, content, args)
+        elif args.tool == "opencode":
+            _merge_json(os.path.join(tool_dir, "opencode.json"), "mcp", translated, args)
+        elif args.tool == "zed":
+            _merge_json(os.path.join(tool_dir, "settings.json"), "context_servers", translated, args)
         else:
-            dst_mcp = os.path.join(tool_dir, "mcp.json")
             content = json.dumps(translated, indent=2, ensure_ascii=False)
-        if os.path.exists(dst_mcp) and not args.force:
-            print(f"  skip mcp (exists, --force to overwrite): {dst_mcp}")
-        else:
-            # 安全：写入前备份已有文件，防丢配置
-            if os.path.exists(dst_mcp):
-                bak = dst_mcp + ".bak." + str(int(os.path.getmtime(dst_mcp)))
-                shutil.copy(dst_mcp, bak)
-                print(f"  backup -> {bak}")
-            with open(dst_mcp, "w", encoding="utf-8") as f:
-                f.write(content)
-            print(f"  mcp -> {dst_mcp}")
+            _write_file(os.path.join(tool_dir, "mcp.json"), content, args)
 
     # adapters（若存在）
     src_ad = os.path.join(args.canonical, "adapters")

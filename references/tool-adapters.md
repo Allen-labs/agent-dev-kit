@@ -43,6 +43,33 @@
   - skill 同步到 `~/.codex/skills/`。
   - `AGENTS.md` 原生读取。
 
+## OpenCode
+
+- 配置：`~/.config/opencode/opencode.json`（全局）/ 项目根 `opencode.json`。
+- 适配：
+  - MCP 放在顶层 `mcp` 键；本地 server `command` 是**数组**、`environment` 承载 env：
+    ```json
+    {
+      "$schema": "https://opencode.ai/config.json",
+      "mcp": { "my-server": { "type": "local", "command": ["npx","-y","@server/cli"], "enabled": true, "environment": { "KEY": "${KEY}" } } }
+    }
+    ```
+  - `bootstrap.py` 已翻译并**合并**进已有 `opencode.json`（不覆盖 agents/providers）。
+  - skill 复制到 `~/.config/opencode/skills/`（best-effort）；`AGENTS.md` 放 `~/.config/opencode/` 或项目根。
+  - 详见 `assets/adapters/opencode.md`。
+
+## Zed
+
+- 配置：`~/.config/zed/settings.json`（全局）/ `.zed/settings.json`（项目）。
+- 适配：
+  - MCP 放在 **`context_servers`** 键；`command` 是**字符串**、`args` 数组：
+    ```json
+    { "context_servers": { "my-server": { "command": "npx", "args": ["-y","@server/cli"], "env": { "KEY": "${KEY}" } } } }
+    ```
+  - `bootstrap.py` 已翻译并**合并**进已有 `settings.json`（不覆盖其他 Zed 设置）。
+  - 无 skills 文件夹，用 `/context` 自定义上下文替代；`AGENTS.md` 放 `~/.config/zed/`。
+  - 详见 `assets/adapters/zed.md`。
+
 ## MCP 翻译要点（通用）
 
 1. 取 canonical `mcp.servers.json` 里每个 server 的 `command` / `args` / `env`。
@@ -67,6 +94,8 @@
 - **Claude Code**：`~/.claude/settings.json` 的 `hooks.PreToolUse` / `PostToolUse` 调命令。
 - **Codex**：`~/.codex/config.toml` 的 `[hooks]` 段（`pre-tool-use` / `post-task`）。
 - **Cursor**：agent 配置里用 shell 命令绑定，逻辑同上。
+- **OpenCode**：`opencode.json` 的 `hooks` 段绑定脚本（参考官方 hooks 文档）。
+- **Zed**：agent 配置里以 shell 命令绑定，逻辑同上。
 
 ## dotfiles 扇出纪律
 

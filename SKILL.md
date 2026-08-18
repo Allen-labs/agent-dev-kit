@@ -39,7 +39,7 @@ description: 融合"项目宪法生成、个性化研发流程、可携带环境
 目标：换工具时快速复原并适配最优配置。完整命令链（均已实测）：
 1. `scripts/scan_env.py --materialize <canonical目录>` —— 扫描当前 WorkBuddy 环境的 skills + mcp.json，materialize 成 canonical 仓库骨架：`skills/`（复制，排除子仓库 `.git` 避免 gitlink 空洞）、`mcp/mcp.servers.json`（密钥全部替换为 `${ENV}` 占位，绝不写死）、`flow.md`、`user.md`、`adapters/`、`AGENTS.md`（个人级宪法）。也可只用 `--out report.json` 仅打印报告。
    - 技能内置一份 **MCP 最佳集合**模板（`assets/mcp/mcp.servers.json` + `mcp/README.md`：Context7 / Filesystem / Memory / Playwright / GitHub / Postgres / SQLite，2026 验证的官方/厂商包名）与 **hooks 护栏**（`assets/hooks/`：密钥扫描 / 危险命令确认 / 记忆回写 3 个跨平台脚本 + `hooks.json` 声明）。把它们合并进你的 canonical，即得"最好一套"配置。
-2. `references/tool-adapters.md` —— 按目标工具（workbuddy / claude / cursor / codex）的薄适配器说明 + MCP 格式翻译规则（JSON / TOML）+ Hooks 接线方式。
+2. `references/tool-adapters.md` —— 按目标工具（workbuddy / claude / cursor / codex / **opencode** / **zed**）的薄适配器说明 + MCP 格式翻译规则（JSON / TOML / OpenCode `mcp` / Zed `context_servers`）+ Hooks 接线方式。
 3. `scripts/bootstrap.py --canonical <目录> --tool <目标>` —— 把 canonical 扇出（copy）到目标工具目录；写入前**自动备份**已有 `mcp.json` 为 `.bak`；canonical 含 `adapters/` 或 `hooks/` 时一并复制。**默认 dry-run，加 `--write` 才落盘；`--force` 覆盖已有文件**。**警告：写到真实 home 目录（如 `~/.workbuddy`）会改动你现有环境，务必先 dry-run 确认，且本技能绝不主动对真实目录 `--write`——由你显式决定。**
 4. `scripts/doctor.py --canonical <目录>` —— 体检：AGENTS.md 质量 / 泄密扫描（已排除 `${{ secrets.X }}` 等模板变量与文档示例误报）/ 必需文件 / 与 canonical 的 drift。
 
