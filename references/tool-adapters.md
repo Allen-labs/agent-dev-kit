@@ -52,6 +52,22 @@
 3. `env` 里的密钥值用环境变量占位（如 `"${API_KEY}"`），从 `.env` 注入，绝不写死。
 4. 跑不起来的 server（依赖某工具独占能力）标记 `// TODO: adapt` 并告诉用户，不要静默丢弃。
 
+## Hooks 扇出（自动化护栏）
+
+`hooks/` 目录（3 个工具无关的 Python 脚本 + `hooks.json` 声明）由 `bootstrap.py` 一并复制到
+目标工具目录（如 `~/.workbuddy/hooks`、`~/.claude/hooks`、`~/.codex/hooks`）。脚本跨平台，
+但**接线方式因工具而异**，详见 `hooks/README.md`：
+
+- `secret-scan`（pre-commit）：提交前扫文件，命中真实密钥即阻断。
+- `danger-confirm`（pre-tool-use）：拦截 rm -rf / force push / drop 等，需显式确认。
+- `memory-update`（post-task）：任务结束把决策/约定回写 `.agents/memory`。
+
+各工具接线要点：
+- **WorkBuddy**：脚本入 `~/.workbuddy/hooks/`，在工作流里绑定触发。
+- **Claude Code**：`~/.claude/settings.json` 的 `hooks.PreToolUse` / `PostToolUse` 调命令。
+- **Codex**：`~/.codex/config.toml` 的 `[hooks]` 段（`pre-tool-use` / `post-task`）。
+- **Cursor**：agent 配置里用 shell 命令绑定，逻辑同上。
+
 ## dotfiles 扇出纪律
 
 - 锁文件是 canonical 仓库的 git 历史；各工具目录只放 symlink/copy 的薄层。

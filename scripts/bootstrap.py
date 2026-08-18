@@ -84,6 +84,10 @@ def main():
     if args.tool == "claude":
         plan.append((f"CLAUDE.md -> 指向 canonical AGENTS.md", "file"))
 
+    # hooks（若存在）
+    if os.path.isdir(os.path.join(args.canonical, "hooks")):
+        plan.append((f"hooks/ -> {os.path.join(tool_dir, 'hooks')}", "dir"))
+
     print(f"[bootstrap] 目标工具: {args.tool}  ({tool_dir})")
     if not args.write:
         print("[bootstrap] DRY-RUN（不落盘）。计划：")
@@ -154,7 +158,21 @@ def main():
             shutil.copy(s, d)
             print(f"  adapters -> {d}")
 
-    print("[bootstrap] done. 用本地 .env 回填密钥后再启动目标工具。")
+    # hooks（若存在）：复制脚本 + hooks.json，接线见 hooks/README.md
+    src_hk = os.path.join(args.canonical, "hooks")
+    if os.path.isdir(src_hk):
+        dst_hk = os.path.join(tool_dir, "hooks")
+        os.makedirs(dst_hk, exist_ok=True)
+        for fn in os.listdir(src_hk):
+            s = os.path.join(src_hk, fn)
+            d = os.path.join(dst_hk, fn)
+            if os.path.exists(d) and not args.force:
+                print(f"  skip (exists): {d}")
+                continue
+            shutil.copy(s, d)
+            print(f"  hooks -> {d}")
+
+    print("[bootstrap] done. 用本地 .env 回填密钥后再启动目标工具；hooks 按 hooks/README.md 接线。")
 
 
 if __name__ == "__main__":

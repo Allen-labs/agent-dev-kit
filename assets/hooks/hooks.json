@@ -1,0 +1,25 @@
+{
+  "hooks": [
+    {
+      "id": "secret-scan",
+      "trigger": "pre-commit",
+      "script": "secret_scan.py",
+      "block_on_match": true,
+      "description": "提交前扫描文件，命中真实密钥即阻断"
+    },
+    {
+      "id": "danger-confirm",
+      "trigger": "pre-tool-use",
+      "script": "danger_confirm.py",
+      "block_on_match": true,
+      "description": "拦截 rm -rf / force push / drop 等危险命令，需显式确认"
+    },
+    {
+      "id": "memory-update",
+      "trigger": "post-task",
+      "script": "memory_update.py",
+      "block_on_match": false,
+      "description": "任务结束把关键决策/约定回写 .agents/memory"
+    }
+  ]
+}
