@@ -11,7 +11,7 @@ description: 融合"项目宪法生成、个性化研发流程、可携带环境
 
 **脚本与 agent 互相依托**：
 - 脚本是 agent 的手脚——做 agent 做不了的事（文件操作、checksum、格式翻译、密钥注入）
-- agent 是脚本的指挥——判断何时 push、review pull 回来的 skill、决定升级策略
+- agent 是脚本的指挥——判断何时 apply、review collect 回来的 skill、决定升级策略
 - 脚本输出 JSON（`--json`），agent 直接消费做决策；SKILL.md 是 agent 的操作手册
 
 **单一真相源 + 薄适配器**：规范、流程、skill、MCP 只在 canonical 仓库维护一处，每个工具只放薄指令文件指向它。
@@ -19,16 +19,16 @@ description: 融合"项目宪法生成、个性化研发流程、可携带环境
 ## 五命令生命周期
 
 ```
-init → push → [日常: pull / status / check] → [改 canonical 后: push]
+init → backup → apply → [日常: collect / check] → [改 canonical 后: check → apply]
 ```
 
-| 命令 | 方向 | 做什么 | agent 何时调 |
-|---|---|---|---|
-| `init <path>` | 环境 → canonical | 从当前 WorkBuddy 快照生成 canonical 仓库 | 用户说"初始化/建环境/把当前配置带走" |
-| `push --tool <t>` | canonical → 工具 | 推 skills+MCP+hooks+指令文件到目标工具（幂等） | 用户说"装到 Claude/Cursor/Codex"或"扇出" |
-| `pull --tool <t>` | 工具 → canonical | 把工具新装的 skill 回灌到 canonical | 用户说"我在 workbuddy 装了新 skill"或"回灌" |
-| `status [--tool]` | 双向 | 检测各工具与 canonical 的 drift | 用户说"看看同步状态"或"哪个工具 drift 了" |
-| `check` | 自检 | 体检 canonical（质量+泄密+skill引用） | 改了 canonical 后、push 前 |
+| 命令 | 做什么 | agent 何时调 |
+|---|---|---|
+| `init <path>` | 初始化：从当前 WorkBuddy 快照生成 canonical 仓库 | 用户说"初始化/建环境/把当前配置带走" |
+| `backup --tool <t>` | 备份：把目标工具的现有配置备份到安全目录 | apply 前先备份，用户说"先备份一下" |
+| `apply --tool <t>` | 应用：把 canonical 配置应用到目标工具（幂等 SHA256 + .env 注入） | 用户说"装到 Claude/Cursor/Codex"或"扇出" |
+| `collect --tool <t>` | 收集：把工具新装的 skill 回灌到 canonical | 用户说"我在 workbuddy 装了新 skill"或"回灌" |
+| `check [--tool]` | 检查：体检 canonical（质量+泄密+skill引用）；`--tool` 时附带 drift 检测 | 改了 canonical 后、apply 前、日常巡检 |
 
 所有命令默认 dry-run（只打印计划），加 `--write` 才落盘。加 `--json` 输出结构化数据供 agent 消费。
 
@@ -38,40 +38,41 @@ init → push → [日常: pull / status / check] → [改 canonical 后: push]
 ```
 1. agent 调: python agent-kit.py init ~/agent-dotfiles
 2. agent 读生成的 AGENTS.md / flow.md，和用户确认规范
-3. agent 调: python agent-kit.py check --canonical ~/agent-dotfiles  # 体检
-4. 确认无误后: python agent-kit.py push --canonical ~/agent-dotfiles --tool workbuddy --write
+3. agent 调: python agent-kit.py check --canonical ~/agent-dotfiles  # 检查
+4. 确认无误后: python agent-kit.py apply --canonical ~/agent-dotfiles --tool workbuddy --write
 ```
 
 ### 场景 2：换到 Claude Code
 ```
-1. agent 调: python agent-kit.py push --canonical ~/agent-dotfiles --tool claude (dry-run)
-2. agent review 计划（推哪些 skill、MCP 怎么翻译、CLAUDE.md 会不会覆盖已有）
-3. 用户确认后: --write 落盘
-4. agent 调: python agent-kit.py status --canonical ~/agent-dotfiles --tool claude  # 确认同步
+1. agent 调: python agent-kit.py backup --tool claude              # 先备份现有配置
+2. agent 调: python agent-kit.py apply --canonical ~/agent-dotfiles --tool claude (dry-run)
+3. agent review 计划（推哪些 skill、MCP 怎么翻译、CLAUDE.md 会不会覆盖已有）
+4. 用户确认后: --write 落盘
+5. agent 调: python agent-kit.py check --canonical ~/agent-dotfiles --tool claude  # 确认同步
 ```
 
 ### 场景 3：用户在 WorkBuddy 装了新 skill
 ```
-1. agent 调: python agent-kit.py pull --canonical ~/agent-dotfiles --tool workbuddy (dry-run)
+1. agent 调: python agent-kit.py collect --canonical ~/agent-dotfiles --tool workbuddy (dry-run)
 2. agent review 回灌清单（哪些是真好 skill、哪些是临时试验）
 3. 确认后 --write
-4. agent 调: python agent-kit.py push --canonical ~/agent-dotfiles --tool claude --write  # 同步到其他工具
+4. agent 调: python agent-kit.py apply --canonical ~/agent-dotfiles --tool claude --write  # 同步到其他工具
 ```
 
 ### 场景 4：改了 canonical 里的 skill
 ```
 1. agent 调: python agent-kit.py check --canonical ~/agent-dotfiles  # 确认没改坏
-2. agent 调: python agent-kit.py push --canonical ~/agent-dotfiles --tool all --write  # 推到所有工具
-3. agent 调: python agent-kit.py status --canonical ~/agent-dotfiles  # 确认全部 synced
+2. agent 调: python agent-kit.py apply --canonical ~/agent-dotfiles --tool all --write  # 推到所有工具
+3. agent 调: python agent-kit.py check --canonical ~/agent-dotfiles --tool workbuddy  # 确认 synced
 ```
 
 ## 命令输出解读
 
 脚本输出 `--json` 时，agent 应关注：
-- `push`: `data.summary` = "N new, M modified, K skipped"——判断是否需要重推
-- `pull`: `data.collected` = 回灌了哪些 skill——决定是否要 review
-- `status`: `data.<tool>.drifted` > 0 说明该工具和 canonical 不一致——需要 push 或 pull
-- `check`: `data.overall` = "ok" 才能安全 push；`"issues"` 要先修
+- `backup`: `data.files` = 备份了哪些文件、`data.path` = 备份在哪
+- `apply`: `data.summary` = "N new, M modified, K skipped"——判断是否需要重推
+- `collect`: `data.collected` = 回灌了哪些 skill——决定是否要 review
+- `check`: `data.overall` = "ok" 才能安全 apply；`data.drift.drifted` > 0 说明该工具不一致
 
 ## 三模式路由（项目宪法 / 个性化流程 / 迁移）
 
@@ -105,10 +106,10 @@ init → push → [日常: pull / status / check] → [改 canonical 后: push]
 ## 安全与纪律
 
 - 密钥只进 `.env`（canonical 根目录，gitignore），绝不进仓库或 AGENTS.md。
-- `push` 时从 `.env` 注入真实密钥到目标工具配置；canonical 里的 `mcp.servers.json` 永远保留 `${}` 占位。
+- `apply` 时从 `.env` 注入真实密钥到目标工具配置；canonical 里的 `mcp.servers.json` 永远保留 `${}` 占位。
 - 脚手架脚本：默认 dry-run；写入须显式 `--write`；不越界写 cwd 之外；不覆盖已有文件（除非 `--force`）。
 - AGENTS.md < 150 行；每条规则必须"有用且具体"，否则 agent 会判断无关而忽略。
-- **push 到真实 home 目录会改动现有环境**——务必先 dry-run 确认，agent 绝不主动对真实目录 `--write`。
+- **apply 到真实 home 目录会改动现有环境**——务必先 dry-run 确认，agent 绝不主动对真实目录 `--write`。
 
 ## 交付物清单
 

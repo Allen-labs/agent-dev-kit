@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """agent-kit.py - agent 配置生命周期管理（统一入口）。
 
-五个命令，覆盖从初始化到日常运维的全生命周期：
-  init    初始化 canonical 仓库（从当前环境快照）
-  push    把 canonical 推到目标工具（skills + mcp + hooks + 指令文件）
-  pull    把工具的新增 skill 回灌到 canonical
-  status  查看各工具与 canonical 的同步状态（drift 检测）
-  check   体检 canonical 健康（质量 + 泄密 + skill 引用完整性）
+五个命令，见名知意，覆盖从初始化到日常运维的全生命周期：
+  init     初始化 canonical 仓库（从当前环境快照）
+  backup   备份目标工具的现有配置（apply 前先 backup，安全网）
+  apply    应用 canonical 配置到目标工具（skills + mcp + hooks + 指令文件）
+  collect  收集工具新增的 skill 回灌到 canonical
+  check    检查健康状况（canonical 质量 + 泄密 + skill 引用 + 工具 drift）
 
 脚本与 agent 互相依托：
   - 脚本做 agent 做不了的事（文件操作、checksum、格式翻译）
@@ -15,10 +15,10 @@
 
 用法：
   python agent-kit.py init <path>
-  python agent-kit.py push --canonical <path> --tool <workbuddy|claude|cursor|codex|opencode|zed> [--write]
-  python agent-kit.py pull --canonical <path> --tool <tool> [--write]
-  python agent-kit.py status --canonical <path> [--tool <tool>]
-  python agent-kit.py check --canonical <path>
+  python agent-kit.py backup --tool <workbuddy|claude|cursor|codex|opencode|zed> [--dir <backup_path>]
+  python agent-kit.py apply --canonical <path> --tool <tool> [--write]
+  python agent-kit.py collect --canonical <path> --tool <tool> [--write]
+  python agent-kit.py check --canonical <path> [--tool <tool>]
 """
 import argparse
 import hashlib
@@ -341,7 +341,7 @@ def cmd_push(args):
 
     manifest["files"] = current
     manifest.setdefault("tools", {})[tool] = {
-        "last_push": datetime.now().isoformat(),
+        "last_apply": datetime.now().isoformat(),
         "synced": len(plan["new"]) + len(plan["modified"]),
         "skipped": len(plan["skipped"]),
     }
@@ -349,7 +349,7 @@ def cmd_push(args):
 
     plan["summary"] = "%d new, %d modified, %d skipped" % (
         len(plan["new"]), len(plan["modified"]), len(plan["skipped"]))
-    _emit(args, "push", tool_dir, plan)
+    _emit(args, "apply", tool_dir, plan)
     return 0
 
 
@@ -393,7 +393,7 @@ def cmd_pull(args):
     plan = {"collected": [], "skipped": []}
 
     if not os.path.isdir(src_skills):
-        _emit(args, "pull", tool_dir, {"error": "工具 skills 目录不存在", "collected": [], "skipped": []})
+        _emit(args, "collect", tool_dir, {"error": "工具 skills 目录不存在", "collected": [], "skipped": []})
         return 0
 
     os.makedirs(dst_skills, exist_ok=True)
@@ -419,57 +419,14 @@ def cmd_pull(args):
 
     plan["summary"] = "%d collected, %d skipped" % (
         len(plan["collected"]), len(plan["skipped"]))
-    _emit(args, "pull", tool_dir, plan)
+    _emit(args, "collect", tool_dir, plan)
     return 0
 
 
-# ─── status ──────────────────────────────────────────────
-
-def cmd_status(args):
-    """查看各工具与 canonical 的同步状态（drift 检测）。"""
-    canonical = args.canonical
-    manifest = _load_manifest(canonical)
-    canonical_files = _scan_files(canonical)
-
-    if args.tool and args.tool != "all":
-        tools = {args.tool: TOOL_DIRS[args.tool]}
-    else:
-        tools = TOOL_DIRS
-
-    result = {}
-    for tool, tool_dir in tools.items():
-        dst_skills = os.path.join(tool_dir, "skills")
-        synced = drifted = missing = extra = 0
-        if os.path.isdir(dst_skills):
-            for name in os.listdir(dst_skills):
-                dst = os.path.join(dst_skills, name)
-                if not os.path.isdir(dst) or name == "disabled":
-                    continue
-                ck = "skills/%s" % name
-                if ck not in canonical_files:
-                    extra += 1
-                else:
-                    dst_hash = _dir_hash(dst)
-                    if dst_hash == manifest.get("files", {}).get(ck, ""):
-                        synced += 1
-                    else:
-                        drifted += 1
-            for name in canonical_files:
-                if name.startswith("skills/"):
-                    sname = name.split("/", 1)[1].split("/")[0]
-                    if not os.path.isdir(os.path.join(dst_skills, sname)):
-                        missing += 1
-        result[tool] = {
-            "synced": synced, "drifted": drifted,
-            "missing": missing, "extra": extra,
-            "last_push": manifest.get("tools", {}).get(tool, {}).get("last_push", "never"),
-        }
-
-    _emit(args, "status", canonical, result)
-    return 0
-
+# ─── backup + check（含 drift 检测）──────────────────────
 
 def _dir_hash(path):
+    """递归计算目录的 SHA256（用于 drift 检测）。"""
     h = hashlib.sha256()
     for dirpath, _, files in os.walk(path):
         if ".git" in dirpath:
@@ -483,6 +440,48 @@ def _dir_hash(path):
             except Exception:
                 pass
     return h.hexdigest()
+
+
+def cmd_backup(args):
+    """备份目标工具的配置相关文件到安全目录。apply 前先 backup，安全网。
+    只备份配置类目录（skills/hooks/adapters）和指令文件，不备份运行时数据。"""
+    tool = args.tool
+    tool_dir = TOOL_DIRS[tool]
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = args.dir or os.path.join(HOME, ".agent-kit-backups", "%s-%s" % (tool, ts))
+    backed_up = []
+    errors = []
+
+    if not os.path.isdir(tool_dir):
+        _emit(args, "backup", backup_dir, {"error": "工具目录不存在: %s" % tool_dir, "files": []})
+        return 0
+
+    os.makedirs(backup_dir, exist_ok=True)
+    # 只备份配置相关目录，跳过运行时数据（app/session/cache 等）
+    config_items = ["skills", "hooks", "adapters", "mcp.json", "AGENTS.md",
+                    "CLAUDE.md", ".cursorrules", "config.toml", "opencode.json",
+                    "settings.json"]
+    for item in config_items:
+        src = os.path.join(tool_dir, item)
+        dst = os.path.join(backup_dir, item)
+        if not os.path.exists(src):
+            continue
+        try:
+            if os.path.isdir(src):
+                shutil.copytree(src, dst,
+                    ignore=shutil.ignore_patterns(".git", "__pycache__"),
+                    dirs_exist_ok=True)
+            elif os.path.isfile(src):
+                shutil.copy2(src, dst)
+            backed_up.append(item)
+        except Exception as e:
+            errors.append({"item": item, "error": str(e)[:80]})
+
+    result = {"files": backed_up, "count": len(backed_up), "path": backup_dir}
+    if errors:
+        result["errors"] = errors
+    _emit(args, "backup", backup_dir, result)
+    return 0
 
 
 # ─── check ──────────────────────────────────────────────
@@ -505,9 +504,9 @@ KNOWN_BAD_SKILL_REFS = {
 
 
 def cmd_check(args):
-    """体检 canonical 健康。"""
+    """检查健康状况：canonical 质量 + 泄密 + skill 引用；--tool 时附带 drift 检测。"""
     canonical = args.canonical
-    result = {"agents_md": [], "secrets": [], "skill_refs": [], "required_files": []}
+    result = {"agents_md": [], "secrets": [], "skill_refs": [], "required_files": [], "drift": {}}
 
     ag = os.path.join(canonical, "AGENTS.md")
     if not os.path.exists(ag):
@@ -554,14 +553,43 @@ def cmd_check(args):
         for bad in KNOWN_BAD_SKILL_REFS:
             if "`%s`" % bad in text:
                 result["skill_refs"].append("%s: 含已禁用 skill `%s`" % (fn, bad))
-        for m in re.finditer(r"`([a-z0-9]+(?:-[a-z0-9]+)+)`", text):
-            tok = m.group(1)
-            if tok not in known_skills and tok not in KNOWN_BAD_SKILL_REFS:
-                pass  # 通用检查太吵，只报黑名单命中
 
     for f in ["AGENTS.md", "flow.md", "mcp/mcp.servers.json"]:
         fp = os.path.join(canonical, f)
         result["required_files"].append({"file": f, "exists": os.path.exists(fp)})
+
+    # --tool 时附带 drift 检测
+    if getattr(args, "tool", None):
+        manifest = _load_manifest(canonical)
+        canonical_files = _scan_files(canonical)
+        tool_dir = TOOL_DIRS[args.tool]
+        dst_skills = os.path.join(tool_dir, "skills")
+        synced = drifted = missing = extra = 0
+        if os.path.isdir(dst_skills):
+            for name in os.listdir(dst_skills):
+                dst = os.path.join(dst_skills, name)
+                if not os.path.isdir(dst) or name == "disabled":
+                    continue
+                ck = "skills/%s" % name
+                if ck not in canonical_files:
+                    extra += 1
+                else:
+                    dst_hash = _dir_hash(dst)
+                    if dst_hash == manifest.get("files", {}).get(ck, ""):
+                        synced += 1
+                    else:
+                        drifted += 1
+            for name in canonical_files:
+                if name.startswith("skills/"):
+                    sname = name.split("/", 1)[1].split("/")[0]
+                    if not os.path.isdir(os.path.join(dst_skills, sname)):
+                        missing += 1
+        result["drift"] = {
+            "tool": args.tool,
+            "synced": synced, "drifted": drifted,
+            "missing": missing, "extra": extra,
+            "last_apply": manifest.get("tools", {}).get(args.tool, {}).get("last_apply", "never"),
+        }
 
     all_ok = all(not v for v in [result["agents_md"], result["secrets"],
                                   result["skill_refs"]])
@@ -603,7 +631,7 @@ def _err(msg):
 def main():
     ap = argparse.ArgumentParser(
         prog="agent-kit",
-        description="agent 配置生命周期管理",
+        description="agent 配置生命周期管理（init / backup / apply / collect / check）",
     )
     ap.add_argument("--json", action="store_true", help="输出 JSON 供 agent 消费")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -611,37 +639,39 @@ def main():
     p_init = sub.add_parser("init", help="初始化 canonical 仓库")
     p_init.add_argument("path", help="canonical 仓库路径")
 
-    p_push = sub.add_parser("push", help="推 canonical 到工具")
-    p_push.add_argument("--canonical", required=True)
-    p_push.add_argument("--tool", required=True, choices=list(TOOL_DIRS.keys()))
-    p_push.add_argument("--write", action="store_true", help="真正落盘（默认 dry-run）")
-    p_push.add_argument("--force", action="store_true", help="覆盖已有文件")
+    p_backup = sub.add_parser("backup", help="备份目标工具的现有配置")
+    p_backup.add_argument("--tool", required=True, choices=list(TOOL_DIRS.keys()))
+    p_backup.add_argument("--dir", default=None, help="备份目录（默认 ~/.agent-kit-backups/<tool>-<timestamp>）")
 
-    p_pull = sub.add_parser("pull", help="回灌工具 skill 到 canonical")
-    p_pull.add_argument("--canonical", required=True)
-    p_pull.add_argument("--tool", required=True, choices=list(TOOL_DIRS.keys()))
-    p_pull.add_argument("--write", action="store_true")
+    p_apply = sub.add_parser("apply", help="应用 canonical 配置到工具")
+    p_apply.add_argument("--canonical", required=True)
+    p_apply.add_argument("--tool", required=True, choices=list(TOOL_DIRS.keys()))
+    p_apply.add_argument("--write", action="store_true", help="真正落盘（默认 dry-run）")
+    p_apply.add_argument("--force", action="store_true", help="覆盖已有文件")
 
-    p_status = sub.add_parser("status", help="查看同步状态")
-    p_status.add_argument("--canonical", required=True)
-    p_status.add_argument("--tool", default="all", choices=list(TOOL_DIRS.keys()) + ["all"])
+    p_collect = sub.add_parser("collect", help="收集工具新增 skill 回灌到 canonical")
+    p_collect.add_argument("--canonical", required=True)
+    p_collect.add_argument("--tool", required=True, choices=list(TOOL_DIRS.keys()))
+    p_collect.add_argument("--write", action="store_true")
 
-    p_check = sub.add_parser("check", help="体检 canonical")
+    p_check = sub.add_parser("check", help="检查健康状况（canonical 质量 + 工具 drift）")
     p_check.add_argument("--canonical", required=True)
+    p_check.add_argument("--tool", default=None, choices=list(TOOL_DIRS.keys()),
+                         help="指定工具则额外检查 drift")
 
     args = ap.parse_args()
     if args.cmd == "init":
         return cmd_init(args)
-    if args.cmd == "push":
+    if args.cmd == "backup":
+        return cmd_backup(args)
+    if args.cmd == "apply":
         if not args.write:
-            print("[push] DRY-RUN（加 --write 落盘）")
+            print("[apply] DRY-RUN（加 --write 落盘）")
         return cmd_push(args)
-    if args.cmd == "pull":
+    if args.cmd == "collect":
         if not args.write:
-            print("[pull] DRY-RUN（加 --write 落盘）")
+            print("[collect] DRY-RUN（加 --write 落盘）")
         return cmd_pull(args)
-    if args.cmd == "status":
-        return cmd_status(args)
     if args.cmd == "check":
         return cmd_check(args)
 
