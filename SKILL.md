@@ -27,6 +27,7 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 | `init <path>` | 初始化：从当前 WorkBuddy 快照生成 canonical 仓库 | 用户说"初始化/建环境/把当前配置带走" |
 | `backup --tool <t>` | 备份：把目标工具的现有配置备份到安全目录 | apply 前先备份，用户说"先备份一下" |
 | `apply --tool <t>` | 应用：把 canonical 配置应用到目标工具（幂等 SHA256 + .env 注入） | 用户说"装到 Claude/Cursor/Codex"或"扇出" |
+| `apply --tool <t> --upgrade` | 升级：先自动 backup 再覆盖 canonical 管理的已变更文件，**不动**工具里用户自己新增的 skill | 用户说"已配置过，想覆盖升级"或"更新到最新版" |
 | `collect --tool <t>` | 收集：把工具新装的 skill 回灌到 canonical | 用户说"我在 workbuddy 装了新 skill"或"回灌" |
 | `check [--tool]` | 检查：体检 canonical（质量+泄密+skill引用）；`--tool` 时附带 drift 检测 | 改了 canonical 后、apply 前、日常巡检 |
 
@@ -66,11 +67,20 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 3. agent 调: python agent-kit.py check --canonical ~/agent-dotfiles --tool workbuddy  # 确认 synced
 ```
 
+### 场景 5：已配置过，想覆盖升级
+```
+1. agent 调: python agent-kit.py apply --canonical ~/agent-dotfiles --tool claude --upgrade (dry-run)
+   # upgrade 模式会自动先 backup，再覆盖 canonical 管理的已变更文件，不动你自己在工具里新增的 skill
+2. agent review 计划（哪些是 modified、backup 在哪）
+3. 用户确认后: --write 落盘
+4. 如需回滚: 从 plan["backed_up"] 路径恢复
+```
+
 ## 命令输出解读
 
 脚本输出 `--json` 时，agent 应关注：
 - `backup`: `data.files` = 备份了哪些文件、`data.path` = 备份在哪
-- `apply`: `data.summary` = "N new, M modified, K skipped"——判断是否需要重推
+- `apply`: `data.summary` = "N new, M modified, K skipped"——判断是否需要重推；`data.backed_up` = upgrade 模式的备份路径（回滚用）
 - `collect`: `data.collected` = 回灌了哪些 skill——决定是否要 review
 - `check`: `data.overall` = "ok" 才能安全 apply；`data.drift.drifted` > 0 说明该工具不一致
 

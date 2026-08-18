@@ -267,19 +267,33 @@ def cmd_init(args):
     return 0
 
 
-# ─── push ───────────────────────────────────────────────
+# ─── apply（含 upgrade 模式）─────────────────────────────
 
 def cmd_push(args):
-    """把 canonical 推到目标工具（幂等：checksum 对比，相同则 skip）。"""
+    """把 canonical 推到目标工具。
+    普通模式（默认）：只推 canonical 有、工具没有的（新增）。
+    --upgrade：升级模式，先 backup 再覆盖 canonical 管理的文件（含已变更的），
+              但不动工具里用户自己新增的 skill。
+    --force：强制覆盖所有已有文件（含非 canonical 管理的）。
+    """
     canonical = args.canonical
     tool = args.tool
     env = _load_env(canonical)
     manifest = _load_manifest(canonical)
     current = _scan_files(canonical)
     tool_dir = TOOL_DIRS[tool]
-    plan = {"new": [], "modified": [], "skipped": [], "instructions": []}
+    plan = {"new": [], "modified": [], "skipped": [], "backed_up": None}
+    upgrade = getattr(args, "upgrade", False)
 
     os.makedirs(tool_dir, exist_ok=True)
+
+    # upgrade 模式：先完整 backup
+    if upgrade:
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_dir = os.path.join(HOME, ".agent-kit-backups",
+                                   "%s-upgrade-%s" % (tool, ts))
+        _do_backup(tool_dir, backup_dir)
+        plan["backed_up"] = backup_dir
 
     src_skills = os.path.join(canonical, "skills")
     if os.path.isdir(src_skills):
@@ -293,18 +307,26 @@ def cmd_push(args):
             key = "skills/%s" % name
             src_hash = current.get(key, "")
             dst_hash = manifest.get("files", {}).get(key, "")
+            # 幂等：canonical 没变 + 工具已有 → skip
             if src_hash == dst_hash and os.path.isdir(dst):
                 plan["skipped"].append(key)
                 continue
+            # 工具已有但 canonical 变了 → upgrade 模式覆盖，普通模式 skip
             if os.path.exists(dst):
-                if not args.force:
-                    plan["skipped"].append(key + " (exists, --force)")
-                    continue
-                _backup(dst)
-                shutil.rmtree(dst)
+                if upgrade or args.force:
+                    if upgrade:
+                        _backup(dst)
+                    shutil.rmtree(dst)
+                    shutil.copytree(src, dst,
+                        ignore=shutil.ignore_patterns(".git", ".gitmodules"))
+                    plan["modified"].append(key)
+                else:
+                    plan["skipped"].append(key + " (changed, --upgrade)")
+                continue
+            # 工具没有 → 新增
             shutil.copytree(src, dst,
                 ignore=shutil.ignore_patterns(".git", ".gitmodules"))
-            plan["new" if dst_hash == "" else "modified"].append(key)
+            plan["new"].append(key)
 
     servers = _load_mcp(canonical)
     if servers:
@@ -354,21 +376,29 @@ def cmd_push(args):
 
 
 def _write_or_backup(dst, content, args, plan, label):
-    if os.path.exists(dst) and not args.force:
+    upgrade = getattr(args, "upgrade", False)
+    if os.path.exists(dst) and not args.force and not upgrade:
         plan["skipped"].append(label + " (exists)")
         return
     if os.path.exists(dst):
-        _backup(dst)
+        if upgrade:
+            _backup(dst)
+        elif args.force:
+            _backup(dst)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     with open(dst, "w", encoding="utf-8") as f:
         f.write(content)
-    plan["new" if not os.path.exists(dst + ".bak") else "modified"].append(label)
+    if os.path.exists(dst + ".bak"):
+        plan["modified"].append(label)
+    else:
+        plan["new"].append(label)
 
 
 def _merge_json_file(dst, key, obj, args, plan, label):
+    upgrade = getattr(args, "upgrade", False)
     existing = {}
     if os.path.exists(dst):
-        if not args.force:
+        if not args.force and not upgrade:
             plan["skipped"].append(label + " (exists)")
             return
         try:
@@ -442,31 +472,51 @@ def _dir_hash(path):
     return h.hexdigest()
 
 
-def cmd_backup(args):
-    """备份目标工具的配置相关文件到安全目录。apply 前先 backup，安全网。
-    只备份配置类目录（skills/hooks/adapters）和指令文件，不备份运行时数据。"""
-    tool = args.tool
-    tool_dir = TOOL_DIRS[tool]
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_dir = args.dir or os.path.join(HOME, ".agent-kit-backups", "%s-%s" % (tool, ts))
-    backed_up = []
-    errors = []
-
-    if not os.path.isdir(tool_dir):
-        _emit(args, "backup", backup_dir, {"error": "工具目录不存在: %s" % tool_dir, "files": []})
-        return 0
-
-    os.makedirs(backup_dir, exist_ok=True)
-    # 只备份配置相关目录，跳过运行时数据（app/session/cache 等）
+def _do_backup(tool_dir, backup_dir):
+    """把工具目录的配置相关文件备份到 backup_dir（backup 命令和 upgrade 模式共用）。"""
     config_items = ["skills", "hooks", "adapters", "mcp.json", "AGENTS.md",
                     "CLAUDE.md", ".cursorrules", "config.toml", "opencode.json",
                     "settings.json"]
+    os.makedirs(backup_dir, exist_ok=True)
     for item in config_items:
         src = os.path.join(tool_dir, item)
         dst = os.path.join(backup_dir, item)
         if not os.path.exists(src):
             continue
         try:
+            if os.path.isdir(src):
+                shutil.copytree(src, dst,
+                    ignore=shutil.ignore_patterns(".git", "__pycache__"),
+                    dirs_exist_ok=True)
+            elif os.path.isfile(src):
+                shutil.copy2(src, dst)
+        except Exception:
+            pass  # 锁文件等忽略，不中断 upgrade
+
+
+def cmd_backup(args):
+    """备份目标工具的配置相关文件到安全目录。apply --upgrade 前自动调用。
+    只备份配置类目录（skills/hooks/adapters）和指令文件，不备份运行时数据。"""
+    tool = args.tool
+    tool_dir = TOOL_DIRS[tool]
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = args.dir or os.path.join(HOME, ".agent-kit-backups", "%s-%s" % (tool, ts))
+
+    if not os.path.isdir(tool_dir):
+        _emit(args, "backup", backup_dir, {"error": "工具目录不存在: %s" % tool_dir, "files": []})
+        return 0
+
+    config_items = ["skills", "hooks", "adapters", "mcp.json", "AGENTS.md",
+                    "CLAUDE.md", ".cursorrules", "config.toml", "opencode.json",
+                    "settings.json"]
+    backed_up = []
+    errors = []
+    for item in config_items:
+        src = os.path.join(tool_dir, item)
+        if not os.path.exists(src):
+            continue
+        try:
+            dst = os.path.join(backup_dir, item)
             if os.path.isdir(src):
                 shutil.copytree(src, dst,
                     ignore=shutil.ignore_patterns(".git", "__pycache__"),
@@ -647,7 +697,9 @@ def main():
     p_apply.add_argument("--canonical", required=True)
     p_apply.add_argument("--tool", required=True, choices=list(TOOL_DIRS.keys()))
     p_apply.add_argument("--write", action="store_true", help="真正落盘（默认 dry-run）")
-    p_apply.add_argument("--force", action="store_true", help="覆盖已有文件")
+    p_apply.add_argument("--upgrade", action="store_true",
+                         help="升级模式：先 backup 再覆盖 canonical 管理的已变更文件（不动工具里用户新增的 skill）")
+    p_apply.add_argument("--force", action="store_true", help="强制覆盖所有已有文件")
 
     p_collect = sub.add_parser("collect", help="收集工具新增 skill 回灌到 canonical")
     p_collect.add_argument("--canonical", required=True)
@@ -665,8 +717,9 @@ def main():
     if args.cmd == "backup":
         return cmd_backup(args)
     if args.cmd == "apply":
+        mode = " --upgrade" if getattr(args, "upgrade", False) else ""
         if not args.write:
-            print("[apply] DRY-RUN（加 --write 落盘）")
+            print("[apply%s] DRY-RUN（加 --write 落盘）" % mode)
         return cmd_push(args)
     if args.cmd == "collect":
         if not args.write:
