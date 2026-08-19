@@ -103,7 +103,7 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 ### 模式 C · migrate（可携带环境迁移）
 完全由五命令覆盖（见上方"agent 操作手册"）。`agent-kit.py init` 从当前环境快照生成 canonical。
 
-> 注：`bootstrap.py` / `doctor.py` / `scan_env.py` 已废弃，功能合并进 `agent-kit.py`，仅保留向后兼容。统一用 `agent-kit.py`。
+> 注：`bootstrap.py` / `doctor.py` / `scan_env.py` 已删除（功能合并进 `agent-kit.py`，git 历史可恢复）。统一用 `agent-kit.py`。
 
 ## 何时读什么（渐进披露）
 
@@ -111,7 +111,7 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 - 建 `.agents/` 结构 → `references/folder-structure.md`
 - 写流程 → `references/flow-template.md` + `references/workbuddy-skills-map.md`
 - 跨工具迁移格式 → `references/tool-adapters.md`
-- 架构设计（进阶）→ `references/architecture-upgrade-design.md`
+- 架构演进历史（一般不需要读）→ `references/architecture-upgrade-design.md`
 
 脚本只在需要做确定性动作时执行，不在纯讨论时跑。
 
@@ -130,7 +130,7 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 ├── AGENTS.md                   # 项目宪法（<150 行）
 ├── flow.md                     # 个性化研发流程（按任务规模分级）
 ├── user.md                     # 个人偏好
-├── skills/                     # 常驻 skill（33 个核心）
+├── skills/                     # 常驻 skill（30+ 个核心，以实际为准）
 ├── skills-optional/            # 按需 skill（18 个文档/资产类）
 ├── mcp/mcp.servers.json        # MCP 定义（${} 占位，安全）
 ├── mcp/README.md               # MCP 选型说明

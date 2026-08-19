@@ -607,6 +607,8 @@ def _dir_hash(path):
     否则 canonical 侧与工具侧路径不同，hash 永远不等，
     导致 synced 恒为 0、全部误报 drifted。
     忽略 __pycache__/.git，避免运行时垃圾造成误报 drifted。
+    行尾归一化（CRLF→LF）：git autocrlf 会让同一文件在两侧行尾不同，
+    不归一化会导致误报 drifted。
     """
     h = hashlib.sha256()
     root = os.path.abspath(path)
@@ -619,7 +621,8 @@ def _dir_hash(path):
                 h.update(rel.encode("utf-8"))
                 h.update(b"\0")
                 with open(fp, "rb") as f:
-                    h.update(f.read())
+                    raw = f.read()
+                h.update(raw.replace(b"\r\n", b"\n"))
             except Exception:
                 pass
     return h.hexdigest()
