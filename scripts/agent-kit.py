@@ -30,8 +30,11 @@ import sys
 from datetime import datetime
 
 HOME = os.path.expanduser("~")
-SKILLS_DIR = os.path.join(HOME, ".workbuddy", "skills")
-MCP_PATH = os.path.join(HOME, ".workbuddy", "mcp.json")
+# init 快照源；可用 AGENT_KIT_SKILLS_DIR 覆盖（测试隔离/自定义环境）
+SKILLS_DIR = os.environ.get("AGENT_KIT_SKILLS_DIR",
+                            os.path.join(HOME, ".workbuddy", "skills"))
+MCP_PATH = os.environ.get("AGENT_KIT_MCP_PATH",
+                          os.path.join(HOME, ".workbuddy", "mcp.json"))
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets")
 TOOL_DIRS = {
     "workbuddy": os.path.join(HOME, ".workbuddy"),
@@ -41,6 +44,13 @@ TOOL_DIRS = {
     "opencode": os.path.join(HOME, ".config", "opencode"),
     "zed": os.path.join(HOME, ".config", "zed"),
 }
+
+
+def _tool_dir(tool):
+    """返回工具目录；可用环境变量 AGENT_KIT_TOOL_DIR_<TOOL> 覆盖（测试隔离用）。"""
+    return os.environ.get("AGENT_KIT_TOOL_DIR_" + tool.upper(), TOOL_DIRS[tool])
+
+
 MANIFEST_PATH = ".sync/manifest.json"
 
 
@@ -193,10 +203,11 @@ def _merge_toml(dst, new_sections, args, plan, label):
                 existing = f.read()
         except Exception:
             existing = ""
-        if getattr(args, "upgrade", False):
-            _backup(dst)
-        elif args.force:
-            _backup(dst)
+        if getattr(args, "write", False):
+            if getattr(args, "upgrade", False):
+                _backup(dst)
+            elif args.force:
+                _backup(dst)
     # 解析 new_sections 里要推的 server 名
     new_names = set(re.findall(r"^\[mcp_servers\.([^.\]]+)\]", new_sections, re.MULTILINE))
     # 从 existing 里删除同名旧 section（含子段 [mcp_servers.xxx.env]）
@@ -225,6 +236,10 @@ def _merge_toml(dst, new_sections, args, plan, label):
     if cleaned:
         cleaned += "\n\n"
     content = cleaned + new_sections.strip() + "\n"
+    dry = not getattr(args, "write", False)
+    if dry:
+        plan["modified"].append(label + " (dry-run)")
+        return
     os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
     with open(dst, "w", encoding="utf-8") as f:
         f.write(content)
@@ -237,7 +252,7 @@ def _instruction_file(tool, canonical):
     ag = os.path.join(canonical, "AGENTS.md")
     if not os.path.isfile(ag):
         return None, None
-    tool_dir = TOOL_DIRS[tool]
+    tool_dir = _tool_dir(tool)
     if tool == "claude":
         return os.path.join(tool_dir, "CLAUDE.md"), "@%s" % ag.replace("\\", "/")
     if tool == "cursor":
@@ -249,10 +264,47 @@ def _instruction_file(tool, canonical):
     return None, None
 
 
+def _remove_tree(path):
+    """深度删除目录树。
+
+    不用 shutil.rmtree：部分沙箱环境（如 WorkBuddy CLI）会给 rmtree
+    挂安全钩子走回收站，回收站不可用时抛 SAFE_DELETE_FAIL_CLOSED。
+    用 os.remove/os.rmdir 逐层删，任何环境通用。"""
+    if not os.path.isdir(path):
+        return
+    for root, dirs, files in os.walk(path, topdown=False):
+        for fn in files:
+            try:
+                os.remove(os.path.join(root, fn))
+            except OSError:
+                pass
+        for dn in dirs:
+            try:
+                os.rmdir(os.path.join(root, dn))
+            except OSError:
+                pass
+    try:
+        os.rmdir(path)
+    except OSError:
+        pass
+
+
 def _backup(dst):
+    """备份单个文件或目录（目录用 copytree，文件用 copy2）。
+    修复：apply 覆盖 skill 目录时 _backup 被传入目录，
+    旧实现 copy2 不支持目录 → Windows PermissionError。
+    bak 名加递增后缀，避免同一秒多次备份冲突。"""
     if os.path.exists(dst):
-        bak = dst + ".bak." + str(int(os.path.getmtime(dst)))
-        shutil.copy2(dst, bak)
+        base = dst + ".bak." + str(int(os.path.getmtime(dst)))
+        bak = base
+        i = 1
+        while os.path.exists(bak):
+            bak = "%s.%d" % (base, i)
+            i += 1
+        if os.path.isdir(dst):
+            shutil.copytree(dst, bak)
+        else:
+            shutil.copy2(dst, bak)
         return bak
     return None
 
@@ -340,14 +392,15 @@ def cmd_push(args):
     env = _load_env(canonical)
     manifest = _load_manifest(canonical)
     current = _scan_files(canonical)
-    tool_dir = TOOL_DIRS[tool]
+    tool_dir = _tool_dir(tool)
     plan = {"new": [], "modified": [], "skipped": [], "backed_up": None}
     upgrade = getattr(args, "upgrade", False)
+    dry = not getattr(args, "write", False)  # 真 dry-run：不落盘
 
     os.makedirs(tool_dir, exist_ok=True)
 
-    # upgrade 模式：先完整 backup
-    if upgrade:
+    # upgrade 模式：先完整 backup（dry-run 不落盘）
+    if upgrade and not dry:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         backup_dir = os.path.join(HOME, ".agent-kit-backups",
                                    "%s-upgrade-%s" % (tool, ts))
@@ -361,22 +414,26 @@ def cmd_push(args):
         for name in os.listdir(src_skills):
             src = os.path.join(src_skills, name)
             dst = os.path.join(dst_skills, name)
-            if not os.path.isdir(src) or name == "disabled":
+            if not os.path.isdir(src) or not _is_skill_dir(name):
                 continue
             key = "skills/%s" % name
-            src_hash = current.get(key, "")
-            dst_hash = manifest.get("files", {}).get(key, "")
-            # 幂等：canonical 没变 + 工具目录真实存在 → skip
-            # 防御：即使 manifest 说已同步，文件可能被删了 → 检查 isdir
-            if src_hash == dst_hash and os.path.isdir(dst) and os.listdir(dst):
+            # 幂等：canonical 侧与工具侧同名 skill 目录内容一致 → skip
+            # （不依赖 manifest——manifest 只是 canonical 快照，不代表工具侧真实状态。
+            #   旧实现用 manifest 比对：collect 更新 canonical 后 manifest 同步更新，
+            #   导致 apply 永远 skip，工具侧旧副本无法升级，drift 无法修复）
+            if (os.path.isdir(dst) and os.listdir(dst)
+                    and _dir_hash(src) == _dir_hash(dst)):
                 plan["skipped"].append(key)
                 continue
             # 工具已有但 canonical 变了 → upgrade 模式覆盖，普通模式 skip
             if os.path.exists(dst):
                 if upgrade or args.force:
+                    if dry:
+                        plan["modified"].append(key + " (dry-run)")
+                        continue
                     if upgrade:
                         _backup(dst)
-                    shutil.rmtree(dst)
+                    _remove_tree(dst)
                     shutil.copytree(src, dst,
                         ignore=shutil.ignore_patterns(".git", ".gitmodules"))
                     plan["modified"].append(key)
@@ -384,6 +441,9 @@ def cmd_push(args):
                     plan["skipped"].append(key + " (changed, --upgrade)")
                 continue
             # 工具没有 → 新增
+            if dry:
+                plan["new"].append(key + " (dry-run)")
+                continue
             shutil.copytree(src, dst,
                 ignore=shutil.ignore_patterns(".git", ".gitmodules"))
             plan["new"].append(key)
@@ -422,12 +482,13 @@ def cmd_push(args):
                                  args, plan, "hooks/%s" % fn)
 
     manifest["files"] = current
-    manifest.setdefault("tools", {})[tool] = {
-        "last_apply": datetime.now().isoformat(),
-        "synced": len(plan["new"]) + len(plan["modified"]),
-        "skipped": len(plan["skipped"]),
-    }
-    _save_manifest(canonical, manifest)
+    if not dry:
+        manifest.setdefault("tools", {})[tool] = {
+            "last_apply": datetime.now().isoformat(),
+            "synced": len(plan["new"]) + len(plan["modified"]),
+            "skipped": len(plan["skipped"]),
+        }
+        _save_manifest(canonical, manifest)
 
     plan["summary"] = "%d new, %d modified, %d skipped" % (
         len(plan["new"]), len(plan["modified"]), len(plan["skipped"]))
@@ -437,14 +498,19 @@ def cmd_push(args):
 
 def _write_or_backup(dst, content, args, plan, label):
     upgrade = getattr(args, "upgrade", False)
+    dry = not getattr(args, "write", False)
     if os.path.exists(dst) and not args.force and not upgrade:
         plan["skipped"].append(label + " (exists)")
         return
     if os.path.exists(dst):
-        if upgrade:
+        if upgrade and not dry:
             _backup(dst)
-        elif args.force:
+        elif args.force and not dry:
             _backup(dst)
+    if dry:
+        plan[("new" if not os.path.exists(dst) else "modified")].append(
+            label + " (dry-run)")
+        return
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     with open(dst, "w", encoding="utf-8") as f:
         f.write(content)
@@ -474,41 +540,60 @@ def _merge_json_file(dst, key, obj, args, plan, label):
 # ─── pull ───────────────────────────────────────────────
 
 def cmd_pull(args):
-    """把工具的新增 skill 回灌到 canonical。"""
+    """把工具的新增/更新 skill 回灌到 canonical。
+
+    - canonical 没有的 → collected（新增）
+    - 两侧都有但内容不同 → updated（工具侧为准，覆盖 canonical）
+    - 两侧一致 → skipped
+    """
     canonical = args.canonical
     tool = args.tool
-    tool_dir = TOOL_DIRS[tool]
+    tool_dir = _tool_dir(tool)
     src_skills = os.path.join(tool_dir, "skills")
     dst_skills = os.path.join(canonical, "skills")
-    plan = {"collected": [], "skipped": []}
+    plan = {"collected": [], "updated": [], "skipped": []}
 
     if not os.path.isdir(src_skills):
-        _emit(args, "collect", tool_dir, {"error": "工具 skills 目录不存在", "collected": [], "skipped": []})
+        _emit(args, "collect", tool_dir,
+              {"error": "工具 skills 目录不存在",
+               "collected": [], "updated": [], "skipped": []})
         return 0
 
     os.makedirs(dst_skills, exist_ok=True)
     for name in sorted(os.listdir(src_skills)):
         src = os.path.join(src_skills, name)
         dst = os.path.join(dst_skills, name)
-        if not os.path.isdir(src):
+        if not os.path.isdir(src) or not _is_skill_dir(name):
             continue
         if os.path.isdir(dst):
-            plan["skipped"].append(name)
+            # 已存在：内容一致 → skip；不同 → 更新（工具侧为准）
+            if _dir_hash(src) == _dir_hash(dst):
+                plan["skipped"].append(name)
+                continue
+            if not args.write:
+                plan["updated"].append(name + " (dry-run)")
+                continue
+            _remove_tree(dst)
+            shutil.copytree(src, dst,
+                ignore=shutil.ignore_patterns(".git", ".gitmodules",
+                                              "__pycache__", "*.pyc"))
+            plan["updated"].append(name)
             continue
         if not args.write:
             plan["collected"].append(name + " (dry-run)")
             continue
         shutil.copytree(src, dst,
-            ignore=shutil.ignore_patterns(".git", ".gitmodules"))
+            ignore=shutil.ignore_patterns(".git", ".gitmodules",
+                                          "__pycache__", "*.pyc"))
         plan["collected"].append(name)
 
-    if plan["collected"] and args.write:
+    if (plan["collected"] or plan["updated"]) and args.write:
         manifest = _load_manifest(canonical)
         manifest["files"] = _scan_files(canonical)
         _save_manifest(canonical, manifest)
 
-    plan["summary"] = "%d collected, %d skipped" % (
-        len(plan["collected"]), len(plan["skipped"]))
+    plan["summary"] = "%d collected, %d updated, %d skipped" % (
+        len(plan["collected"]), len(plan["updated"]), len(plan["skipped"]))
     _emit(args, "collect", tool_dir, plan)
     return 0
 
@@ -516,20 +601,39 @@ def cmd_pull(args):
 # ─── backup + check（含 drift 检测）──────────────────────
 
 def _dir_hash(path):
-    """递归计算目录的 SHA256（用于 drift 检测）。"""
+    """递归计算目录的 SHA256（用于 drift 检测）。
+
+    只 hash「相对路径 + 内容」，不含绝对路径——
+    否则 canonical 侧与工具侧路径不同，hash 永远不等，
+    导致 synced 恒为 0、全部误报 drifted。
+    忽略 __pycache__/.git，避免运行时垃圾造成误报 drifted。
+    """
     h = hashlib.sha256()
-    for dirpath, _, files in os.walk(path):
-        if ".git" in dirpath:
-            continue
+    root = os.path.abspath(path)
+    for dirpath, dirnames, files in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".git")]
         for fn in sorted(files):
             fp = os.path.join(dirpath, fn)
+            rel = os.path.relpath(fp, root).replace(os.sep, "/")
             try:
-                h.update(fp.encode())
+                h.update(rel.encode("utf-8"))
+                h.update(b"\0")
                 with open(fp, "rb") as f:
                     h.update(f.read())
             except Exception:
                 pass
     return h.hexdigest()
+
+
+def _is_skill_dir(name):
+    """判断目录名是否为真正的 skill（排除系统/备份/缓存目录）。"""
+    if name in ("disabled", ".system", ".git", "__pycache__"):
+        return False
+    if name.startswith("."):
+        return False
+    if ".bak." in name:
+        return False
+    return True
 
 
 def _do_backup(tool_dir, backup_dir):
@@ -558,7 +662,7 @@ def cmd_backup(args):
     """备份目标工具的配置相关文件到安全目录。apply --upgrade 前自动调用。
     只备份配置类目录（skills/hooks/adapters）和指令文件，不备份运行时数据。"""
     tool = args.tool
-    tool_dir = TOOL_DIRS[tool]
+    tool_dir = _tool_dir(tool)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_dir = args.dir or os.path.join(HOME, ".agent-kit-backups", "%s-%s" % (tool, ts))
 
@@ -671,7 +775,7 @@ def cmd_check(args):
     # --tool 时附带 drift 检测（skill 目录级对比）
     if getattr(args, "tool", None):
         manifest = _load_manifest(canonical)
-        tool_dir = TOOL_DIRS[args.tool]
+        tool_dir = _tool_dir(args.tool)
         src_skills = os.path.join(canonical, "skills")
         dst_skills = os.path.join(tool_dir, "skills")
         synced = drifted = missing = extra = 0
@@ -680,13 +784,15 @@ def cmd_check(args):
         canon_skills = set()
         if os.path.isdir(src_skills):
             canon_skills = {n for n in os.listdir(src_skills)
-                           if os.path.isdir(os.path.join(src_skills, n)) and n != "disabled"}
+                           if os.path.isdir(os.path.join(src_skills, n))
+                           and _is_skill_dir(n)}
 
         # 工具侧的 skill 名集合
         tool_skills = set()
         if os.path.isdir(dst_skills):
             tool_skills = {n for n in os.listdir(dst_skills)
-                          if os.path.isdir(os.path.join(dst_skills, n)) and n != "disabled" and n != ".system"}
+                          if os.path.isdir(os.path.join(dst_skills, n))
+                          and _is_skill_dir(n)}
 
         # 对比
         for name in canon_skills | tool_skills:

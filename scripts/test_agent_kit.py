@@ -19,13 +19,16 @@ PY = sys.executable
 SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-kit.py")
 
 
-def run_agent_kit(*args, json_mode=False):
-    """运行 agent-kit.py，返回 (returncode, stdout)。"""
+def run_agent_kit(*args, json_mode=False, env=None):
+    """运行 agent-kit.py，返回 (returncode, stdout)。env 可覆盖 AGENT_KIT_TOOL_DIR_*。"""
     cmd = [PY, SCRIPT]
     if json_mode:
         cmd.append("--json")
     cmd.extend(args)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    full_env = os.environ.copy()
+    if env:
+        full_env.update(env)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=full_env)
     return result.returncode, result.stdout
 
 
@@ -35,13 +38,20 @@ class TestInitCheck(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="agent-kit-test-")
         self.canonical = os.path.join(self.tmpdir, "canonical")
+        # 迷你 fake skills 源：init 用它快照，避免复制真实 ~/.workbuddy/skills
+        self.fake_skills = os.path.join(self.tmpdir, "fake-skills")
+        os.makedirs(os.path.join(self.fake_skills, "mini-skill"))
+        with open(os.path.join(self.fake_skills, "mini-skill", "SKILL.md"),
+                  "w", encoding="utf-8") as f:
+            f.write("---\nname: mini-skill\ndescription: mini\n---\n# mini\n")
+        self.env = {"AGENT_KIT_SKILLS_DIR": self.fake_skills}
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_init_creates_canonical(self):
         """init 应该创建 canonical 仓库，含 AGENTS.md / flow.md / skills/。"""
-        rc, out = run_agent_kit("init", self.canonical)
+        rc, out = run_agent_kit("init", self.canonical, env=self.env)
         self.assertEqual(rc, 0, "init 应该成功")
         self.assertTrue(os.path.isfile(os.path.join(self.canonical, "AGENTS.md")))
         self.assertTrue(os.path.isfile(os.path.join(self.canonical, "flow.md")))
@@ -50,8 +60,9 @@ class TestInitCheck(unittest.TestCase):
 
     def test_check_after_init(self):
         """init 后 check 应该返回 overall: ok。"""
-        run_agent_kit("init", self.canonical)
-        rc, out = run_agent_kit("check", "--canonical", self.canonical, json_mode=True)
+        run_agent_kit("init", self.canonical, env=self.env)
+        rc, out = run_agent_kit("check", "--canonical", self.canonical,
+                                json_mode=True, env=self.env)
         self.assertEqual(rc, 0, "check 应该成功")
         data = json.loads(out)
         self.assertEqual(data["data"]["overall"], "ok",
@@ -73,35 +84,121 @@ class TestApplyCollect(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="agent-kit-test-")
         self.canonical = os.path.join(self.tmpdir, "canonical")
         self.fake_tool = os.path.join(self.tmpdir, "fake-tool")
-        os.makedirs(self.fake_tool)
-        run_agent_kit("init", self.canonical)
+        os.makedirs(os.path.join(self.fake_tool, "skills"))
+        # 迷你 fake skills 源（init 快照用），避免复制真实环境
+        self.fake_skills = os.path.join(self.tmpdir, "fake-skills")
+        os.makedirs(os.path.join(self.fake_skills, "mini-skill"))
+        with open(os.path.join(self.fake_skills, "mini-skill", "SKILL.md"),
+                  "w", encoding="utf-8") as f:
+            f.write("---\nname: mini-skill\ndescription: mini\n---\n# mini\n")
+        self.env = {"AGENT_KIT_TOOL_DIR_WORKBUDDY": self.fake_tool,
+                    "AGENT_KIT_SKILLS_DIR": self.fake_skills}
+        run_agent_kit("init", self.canonical, env=self.env)
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    def _add_skill(self, name, content):
+        sk = os.path.join(self.canonical, "skills", name)
+        os.makedirs(sk)
+        with open(os.path.join(sk, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(content)
+        return sk
+
     def test_apply_dry_run_no_write(self):
-        """apply 不带 --write 不应该落盘。"""
+        """apply 不带 --write 不应该落盘（regression: 假 dry-run bug）。"""
+        self._add_skill("dryrun-probe",
+                        "---\nname: dryrun-probe\ndescription: probe\n---\n# probe\n")
         rc, out = run_agent_kit("apply", "--canonical", self.canonical,
-                                "--tool", "workbuddy")
+                                "--tool", "workbuddy", env=self.env)
         self.assertEqual(rc, 0)
         self.assertIn("DRY-RUN", out)
+        # 关键断言：dry-run 后工具目录里不该出现新 skill
+        self.assertFalse(
+            os.path.exists(os.path.join(self.fake_tool, "skills", "dryrun-probe")),
+            "dry-run 不应落盘新 skill")
+
+    def test_apply_upgrade_updates_stale_skill(self):
+        """canonical 更新后，apply --upgrade 应覆盖工具侧旧副本
+        （regression: manifest 幂等 bug——旧实现用 manifest 比对，
+        manifest 刷新后 apply 永远 skip 旧副本）。"""
+        # 1. canonical 放 v1 skill，apply 到 fake tool
+        sk = self._add_skill("stale-probe",
+                             "---\nname: stale-probe\ndescription: v1\n---\nv1 content\n")
+        rc, _ = run_agent_kit("apply", "--canonical", self.canonical,
+                              "--tool", "workbuddy", "--write", env=self.env)
+        self.assertEqual(rc, 0)
+        dst = os.path.join(self.fake_tool, "skills", "stale-probe", "SKILL.md")
+        self.assertTrue(os.path.isfile(dst), "apply --write 应创建 skill")
+        self.assertIn("v1 content", open(dst, encoding="utf-8").read())
+
+        # 2. canonical 更新为 v2（canonical 是真相源，直接改）
+        with open(os.path.join(sk, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: stale-probe\ndescription: v2\n---\nv2 content\n")
+
+        # 3. apply --upgrade：工具侧还是 v1，应被覆盖为 v2
+        rc, out = run_agent_kit("apply", "--canonical", self.canonical,
+                                "--tool", "workbuddy", "--upgrade", "--write",
+                                env=self.env)
+        self.assertEqual(rc, 0)
+        self.assertIn("modified", out, "upgrade 应把旧副本标记为 modified")
+        content = open(dst, encoding="utf-8").read()
+        self.assertIn("v2 content", content)
+        self.assertNotIn("v1 content", content)
+
+    def test_collect_updates_existing_skill(self):
+        """工具侧内容与 canonical 不同时，collect 应更新 canonical（工具侧为准）。"""
+        # 1. canonical v1 → apply 到 tool
+        self._add_skill("upd-probe",
+                        "---\nname: upd-probe\ndescription: v1\n---\nv1 content\n")
+        run_agent_kit("apply", "--canonical", self.canonical,
+                      "--tool", "workbuddy", "--write", env=self.env)
+        # 2. 工具侧改 v2（模拟在工具里开发/修改）
+        tsk = os.path.join(self.fake_tool, "skills", "upd-probe", "SKILL.md")
+        with open(tsk, "w", encoding="utf-8") as f:
+            f.write("---\nname: upd-probe\ndescription: v2\n---\nv2 content\n")
+        # 3. collect 应把 v2 回灌 canonical
+        rc, out = run_agent_kit("collect", "--canonical", self.canonical,
+                                "--tool", "workbuddy", "--write", env=self.env)
+        self.assertEqual(rc, 0)
+        self.assertIn("updated", out)
+        csk = os.path.join(self.canonical, "skills", "upd-probe", "SKILL.md")
+        self.assertIn("v2 content", open(csk, encoding="utf-8").read(),
+                      "collect 应把工具侧的新内容更新到 canonical")
+
+    def test_collect_ignores_pycache(self):
+        """collect 不应把 __pycache__/*.pyc 收进 canonical。"""
+        sk = os.path.join(self.fake_tool, "skills", "pycache-probe")
+        os.makedirs(os.path.join(sk, "scripts", "__pycache__"))
+        with open(os.path.join(sk, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: pycache-probe\ndescription: probe\n---\n# probe\n")
+        with open(os.path.join(sk, "scripts", "__pycache__", "x.pyc"), "wb") as f:
+            f.write(b"\x00")
+        rc, _ = run_agent_kit("collect", "--canonical", self.canonical,
+                              "--tool", "workbuddy", "--write", env=self.env)
+        self.assertEqual(rc, 0)
+        self.assertTrue(
+            os.path.isdir(os.path.join(self.canonical, "skills", "pycache-probe")))
+        self.assertFalse(
+            os.path.exists(os.path.join(self.canonical, "skills", "pycache-probe",
+                                        "scripts", "__pycache__")),
+            "collect 不应带 __pycache__ 垃圾")
 
     def test_backup_creates_backup_dir(self):
-        """backup 应该创建备份目录。"""
-        # 创建一个假的工具目录
-        fake_codex = os.path.join(self.tmpdir, "fake-codex")
-        os.makedirs(os.path.join(fake_codex, "skills"))
-        with open(os.path.join(fake_codex, "config.toml"), "w") as f:
-            f.write("[test]\nkey = \"value\"\n")
-        # 临时替换 TOOL_DIRS
+        """backup 应该创建备份目录（用 fake 工具目录，隔离真实环境）。"""
+        # fake tool 里放点内容
+        os.makedirs(os.path.join(self.fake_tool, "skills", "demo"), exist_ok=True)
+        with open(os.path.join(self.fake_tool, "skills", "demo", "SKILL.md"),
+                  "w", encoding="utf-8") as f:
+            f.write("---\nname: demo\ndescription: demo\n---\n# demo\n")
         backup_dir = os.path.join(self.tmpdir, "backup")
-        rc, out = run_agent_kit("backup", "--tool", "workbuddy", "--dir", backup_dir)
+        rc, out = run_agent_kit("backup", "--tool", "workbuddy",
+                                "--dir", backup_dir, env=self.env)
         self.assertEqual(rc, 0)
-        # backup 至少备份了 skills 目录
-        data = json.loads(out) if out.strip().startswith("{") else None
-        # 非_json 模式，检查文件
-        self.assertTrue(os.path.isdir(os.path.join(backup_dir, "skills")) or
-                        os.path.isfile(os.path.join(backup_dir, "config.toml")))
+        # 备份目录里应有 skills/demo
+        self.assertTrue(
+            os.path.isfile(os.path.join(backup_dir, "skills", "demo", "SKILL.md")),
+            "backup 应备份 fake tool 的 skills")
 
 
 class TestSecretScan(unittest.TestCase):
