@@ -201,6 +201,20 @@ class TestApplyCollect(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(dst, "review.md")))
         self.assertTrue(os.path.isfile(os.path.join(dst, "test.md")))
 
+    def test_apply_tool_all(self):
+        """apply --tool all 应遍历分发到全部 6 个工具（regression: SKILL.md 声称但缺失）。"""
+        env = dict(self.env)
+        for t in ("workbuddy", "claude", "cursor", "codex", "opencode", "zed"):
+            env["AGENT_KIT_TOOL_DIR_" + t.upper()] = os.path.join(self.tmpdir, "fake-" + t)
+        rc, _ = run_agent_kit("apply", "--canonical", self.canonical,
+                              "--tool", "all", "--write", env=env)
+        self.assertEqual(rc, 0, "apply --tool all 应成功")
+        for t in ("claude", "cursor", "codex"):
+            cmds = os.path.join(self.tmpdir, "fake-" + t,
+                                "commands" if t != "codex" else "prompts")
+            self.assertTrue(os.path.isfile(os.path.join(cmds, "commit.md")),
+                            "%s 应收到命令" % t)
+
     def test_apply_distributes_agents(self):
         """apply 应把 agents 子代理资产分发到 Claude 的 .claude/agents/。"""
         # init 已把 assets/agents 复制进 canonical

@@ -429,7 +429,8 @@ def cmd_init(args):
             d = os.path.join(dst_skills, name)
             if os.path.isdir(src):
                 shutil.copytree(src, d,
-                    ignore=shutil.ignore_patterns(".git", ".gitmodules", ".svn", ".hg"))
+                    ignore=shutil.ignore_patterns(".git", ".gitmodules", ".svn", ".hg",
+                                                  "__pycache__", "*.pyc"))
                 changes["skills"] += 1
 
     mcp_dir = os.path.join(dest, "mcp")
@@ -472,14 +473,16 @@ def cmd_init(args):
         for fn in os.listdir(adir):
             shutil.copy(os.path.join(adir, fn), os.path.join(dst_ad, fn))
 
-    # 地基资产同步：commands / rules / spec-templates / agents（出厂默认 → canonical）
-    for extra in ("commands", "rules", "spec-templates", "agents"):
+    # 地基资产同步：commands / rules / spec-templates / agents / hooks（出厂默认 → canonical）
+    for extra in ("commands", "rules", "spec-templates", "agents", "hooks"):
         sdir = os.path.join(ASSETS_DIR, extra)
         if os.path.isdir(sdir):
             ddir = os.path.join(dest, extra)
             os.makedirs(ddir, exist_ok=True)
             for fn in os.listdir(sdir):
-                shutil.copy(os.path.join(sdir, fn), os.path.join(ddir, fn))
+                src = os.path.join(sdir, fn)
+                if os.path.isfile(src):  # 只复制文件，跳过 __pycache__ 等子目录
+                    shutil.copy(src, os.path.join(ddir, fn))
             changes["files"].append(extra + "/")
 
     manifest = {"version": 1, "files": _scan_files(dest), "tools": {}}
@@ -546,7 +549,7 @@ def cmd_push(args):
                         _backup(dst)
                     _remove_tree(dst)
                     shutil.copytree(src, dst,
-                        ignore=shutil.ignore_patterns(".git", ".gitmodules"))
+                        ignore=shutil.ignore_patterns(".git", ".gitmodules", "__pycache__", "*.pyc"))
                     plan["modified"].append(key)
                 else:
                     plan["skipped"].append(key + " (changed, --upgrade)")
@@ -556,7 +559,7 @@ def cmd_push(args):
                 plan["new"].append(key + " (dry-run)")
                 continue
             shutil.copytree(src, dst,
-                ignore=shutil.ignore_patterns(".git", ".gitmodules"))
+                ignore=shutil.ignore_patterns(".git", ".gitmodules", "__pycache__", "*.pyc"))
             plan["new"].append(key)
 
     servers = _load_mcp(canonical)
@@ -973,6 +976,11 @@ def _err(msg):
 
 # ─── CLI ────────────────────────────────────────────────
 
+def _all_tools():
+    """--tool all 展开为全部工具名。"""
+    return list(TOOL_DIRS.keys())
+
+
 def main():
     ap = argparse.ArgumentParser(
         prog="agent-kit",
@@ -985,12 +993,12 @@ def main():
     p_init.add_argument("path", help="canonical 仓库路径")
 
     p_backup = sub.add_parser("backup", help="备份目标工具的现有配置")
-    p_backup.add_argument("--tool", required=True, choices=list(TOOL_DIRS.keys()))
+    p_backup.add_argument("--tool", required=True, choices=_all_tools() + ["all"])
     p_backup.add_argument("--dir", default=None, help="备份目录（默认 ~/.agent-kit-backups/<tool>-<timestamp>）")
 
     p_apply = sub.add_parser("apply", help="应用 canonical 配置到工具")
     p_apply.add_argument("--canonical", required=True)
-    p_apply.add_argument("--tool", required=True, choices=list(TOOL_DIRS.keys()))
+    p_apply.add_argument("--tool", required=True, choices=_all_tools() + ["all"])
     p_apply.add_argument("--write", action="store_true", help="真正落盘（默认 dry-run）")
     p_apply.add_argument("--upgrade", action="store_true",
                          help="升级模式：先 backup 再覆盖 canonical 管理的已变更文件（不动工具里用户新增的 skill）")
@@ -998,29 +1006,53 @@ def main():
 
     p_collect = sub.add_parser("collect", help="收集工具新增 skill 回灌到 canonical")
     p_collect.add_argument("--canonical", required=True)
-    p_collect.add_argument("--tool", required=True, choices=list(TOOL_DIRS.keys()))
+    p_collect.add_argument("--tool", required=True, choices=_all_tools() + ["all"])
     p_collect.add_argument("--write", action="store_true")
 
     p_check = sub.add_parser("check", help="检查健康状况（canonical 质量 + 工具 drift）")
     p_check.add_argument("--canonical", required=True)
-    p_check.add_argument("--tool", default=None, choices=list(TOOL_DIRS.keys()),
-                         help="指定工具则额外检查 drift")
+    p_check.add_argument("--tool", default=None, choices=_all_tools() + ["all"],
+                         help="指定工具则额外检查 drift（all=全部工具）")
 
     args = ap.parse_args()
     if args.cmd == "init":
         return cmd_init(args)
     if args.cmd == "backup":
+        if getattr(args, "tool", None) == "all":
+            rc = 0
+            for t in _all_tools():
+                args.tool = t
+                rc |= cmd_backup(args)
+            return rc
         return cmd_backup(args)
     if args.cmd == "apply":
         mode = " --upgrade" if getattr(args, "upgrade", False) else ""
         if not args.write:
             print("[apply%s] DRY-RUN（加 --write 落盘）" % mode)
+        if getattr(args, "tool", None) == "all":
+            rc = 0
+            for t in _all_tools():
+                args.tool = t
+                rc |= cmd_push(args)
+            return rc
         return cmd_push(args)
     if args.cmd == "collect":
         if not args.write:
             print("[collect] DRY-RUN（加 --write 落盘）")
+        if getattr(args, "tool", None) == "all":
+            rc = 0
+            for t in _all_tools():
+                args.tool = t
+                rc |= cmd_pull(args)
+            return rc
         return cmd_pull(args)
     if args.cmd == "check":
+        if getattr(args, "tool", None) == "all":
+            rc = 0
+            for t in _all_tools():
+                args.tool = t
+                rc |= cmd_check(args)
+            return rc
         return cmd_check(args)
 
 
