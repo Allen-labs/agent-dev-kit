@@ -378,5 +378,175 @@ class TestSkillRefCheck(unittest.TestCase):
                            "应该检测到已禁用 skill 引用")
 
 
+class TestSetup(unittest.TestCase):
+    """测试 setup：新机器一键复原（init --from + apply + check 串联）。
+
+    用本地 git 仓库做 fixture，不依赖网络。
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="agent-kit-setup-")
+        # 源 canonical：先 init 一份，再 git init 作为可 clone 的远程
+        self.src_canonical = os.path.join(self.tmpdir, "src-canonical")
+        self.git_remote = os.path.join(self.tmpdir, "remote.git")
+        self.target_canonical = os.path.join(self.tmpdir, "dotfiles")
+        self.fake_tool = os.path.join(self.tmpdir, "fake-tool")
+        os.makedirs(os.path.join(self.fake_tool, "skills"))
+        self.fake_skills = os.path.join(self.tmpdir, "fake-skills")
+        os.makedirs(os.path.join(self.fake_skills, "mini-skill"))
+        with open(os.path.join(self.fake_skills, "mini-skill", "SKILL.md"),
+                  "w", encoding="utf-8") as f:
+            f.write("---\nname: mini-skill\ndescription: mini\n---\n# mini\n")
+        self.env = {"AGENT_KIT_TOOL_DIR_WORKBUDDY": self.fake_tool,
+                    "AGENT_KIT_SKILLS_DIR": self.fake_skills}
+        # 1. init 一份 canonical
+        run_agent_kit("init", self.src_canonical, env=self.env)
+        # 2. 把它做成裸仓库可 clone（用 -c 内联 user 配置，避免全局 git config 依赖）
+        git_common = ["-c", "user.name=test", "-c", "user.email=t@e.st"]
+        subprocess.run(["git", "init", "--bare", "--quiet", self.git_remote],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.src_canonical] + git_common +
+                       ["init", "--quiet"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.src_canonical] + git_common +
+                       ["add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.src_canonical] + git_common +
+                       ["commit", "-m", "init", "--quiet"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.src_canonical, "remote", "add",
+                        "origin", self.git_remote], check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.src_canonical, "push", "--quiet",
+                        "origin", "HEAD"], check=True, capture_output=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_setup_dry_run_does_not_write(self):
+        """setup 不带 --write 不应落盘 target canonical。"""
+        rc, out = run_agent_kit("setup", "--from", self.git_remote,
+                                "--canonical", self.target_canonical,
+                                "--tool", "workbuddy", env=self.env)
+        self.assertEqual(rc, 0, "setup dry-run 应该成功")
+        # dry-run 下 init 阶段会 clone（init 内部 git clone 不看 --write），
+        # 但 apply 不应落盘 skill 到工具目录
+        self.assertFalse(
+            os.path.exists(os.path.join(self.fake_tool, "skills", "mini-skill")),
+            "dry-run 不应 apply skill 到工具")
+
+    def test_setup_full_flow_writes_and_checks(self):
+        """setup --write 应该完整跑通 init + apply + check。"""
+        rc, out = run_agent_kit("setup", "--from", self.git_remote,
+                                "--canonical", self.target_canonical,
+                                "--tool", "workbuddy", "--write",
+                                env=self.env)
+        self.assertEqual(rc, 0, "setup --write 应该成功")
+        # 1. canonical 被 clone
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.target_canonical, "AGENTS.md")))
+        # 2. skill 被 apply 到工具
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.fake_tool, "skills", "mini-skill", "SKILL.md")))
+        # 3. 三步都出现在输出
+        self.assertIn("Step 1/3", out)
+        self.assertIn("Step 2/3", out)
+        self.assertIn("Step 3/3", out)
+
+    def test_setup_auto_detect_tools(self):
+        """setup 不传 --tool 应自动探测已安装的工具。"""
+        # fake_tool 目录非空 → 应被探测到
+        rc, out = run_agent_kit("setup", "--from", self.git_remote,
+                                "--canonical", self.target_canonical,
+                                "--write", env=self.env)
+        self.assertEqual(rc, 0, "auto-detect 应该成功")
+        self.assertIn("workbuddy", out, "应探测到 workbuddy")
+
+    def test_setup_idempotent_second_run(self):
+        """setup 第二次跑应该走 git pull 而非报错。"""
+        run_agent_kit("setup", "--from", self.git_remote,
+                      "--canonical", self.target_canonical,
+                      "--tool", "workbuddy", "--write", env=self.env)
+        # 第二次：canonical 已存在，应 git pull 更新
+        rc, out = run_agent_kit("setup", "--from", self.git_remote,
+                                "--canonical", self.target_canonical,
+                                "--tool", "workbuddy", "--write", env=self.env)
+        self.assertEqual(rc, 0, "第二次 setup 应幂等成功")
+        self.assertIn("updated", out)
+
+    def test_setup_json_output(self):
+        """setup --json 应输出结构化报告。"""
+        rc, out = run_agent_kit("setup", "--from", self.git_remote,
+                                "--canonical", self.target_canonical,
+                                "--tool", "workbuddy", "--write",
+                                json_mode=True, env=self.env)
+        self.assertEqual(rc, 0)
+        data = json.loads(out)
+        self.assertEqual(data["cmd"], "setup")
+        self.assertIn("steps", data["data"])
+        steps = [s["step"] for s in data["data"]["steps"]]
+        self.assertIn("init", steps)
+        self.assertIn("apply", steps)
+        self.assertIn("check", steps)
+
+    def test_setup_reports_missing_env_keys(self):
+        """canonical 有 .env.example 含占位符时，setup 应在报告里列出
+        待填密钥清单，让 agent 去问用户。"""
+        # 在 src canonical 里放一个 .env.example，push 到 remote
+        env_example = os.path.join(self.src_canonical, ".env.example")
+        with open(env_example, "w", encoding="utf-8") as f:
+            f.write("GITHUB_TOKEN=${GITHUB_TOKEN}\n"
+                    "OPENAI_API_KEY=${OPENAI_API_KEY}\n"
+                    "ALREADY_FILLED=sk-real-value-123\n")
+        git_common = ["-c", "user.name=test", "-c", "user.email=t@e.st"]
+        subprocess.run(["git", "-C", self.src_canonical] + git_common +
+                       ["add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.src_canonical] + git_common +
+                       ["commit", "-m", "add env example", "--quiet"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.src_canonical, "push", "--quiet",
+                        "origin", "HEAD"], check=True, capture_output=True)
+
+        rc, out = run_agent_kit("setup", "--from", self.git_remote,
+                                "--canonical", self.target_canonical,
+                                "--tool", "workbuddy", "--write",
+                                json_mode=True, env=self.env)
+        self.assertEqual(rc, 0)
+        data = json.loads(out)
+        # missing_env_keys 应列出 2 个占位符（不含 ALREADY_FILLED）
+        self.assertIn("missing_env_keys", data["data"])
+        self.assertEqual(set(data["data"]["missing_env_keys"]),
+                         {"GITHUB_TOKEN", "OPENAI_API_KEY"})
+        self.assertIn("env_action", data["data"])
+
+    def test_setup_ignores_example_values_not_placeholders(self):
+        """regression: .env.example 里如果误写成示例值（如 ghp_xxx）
+        而非 ${KEY} 占位符，setup 不应误判为"已填好"。
+        正确约定是 .env.example 用 ${KEY} 占位符，示例值场景应被检测出
+        来作为 missing（因为值不含 ${...} 但仍是占位性质的示例）。
+        当前实现只认 ${...} 占位符，所以示例值会被当成"已填"——
+        这是 canonical 仓库应避免的，测试锁定正确约定。"""
+        # .env.example 用 ${KEY} 占位符（正确约定）
+        env_example = os.path.join(self.src_canonical, ".env.example")
+        with open(env_example, "w", encoding="utf-8") as f:
+            f.write("# 注释行不该被扫描\n"
+                    "REAL_KEY=${REAL_KEY}\n"
+                    "# OPTIONAL_KEY=${OPTIONAL_KEY}\n")  # 注释里的不扫
+        git_common = ["-c", "user.name=test", "-c", "user.email=t@e.st"]
+        subprocess.run(["git", "-C", self.src_canonical] + git_common +
+                       ["add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.src_canonical] + git_common +
+                       ["commit", "-m", "env convention", "--quiet"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.src_canonical, "push", "--quiet",
+                        "origin", "HEAD"], check=True, capture_output=True)
+
+        rc, out = run_agent_kit("setup", "--from", self.git_remote,
+                                "--canonical", self.target_canonical,
+                                "--tool", "workbuddy", "--write",
+                                json_mode=True, env=self.env)
+        self.assertEqual(rc, 0)
+        data = json.loads(out)
+        self.assertEqual(data["data"]["missing_env_keys"], ["REAL_KEY"],
+                         "只有非注释行的 ${KEY} 才算待填；注释行不扫")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1000,6 +1000,171 @@ def _all_tools():
     return list(TOOL_DIRS.keys())
 
 
+def _detect_installed_agents():
+    """探测本机已安装的 agent CLI（目录存在 + 非空）。
+
+    返回 [tool_name, ...]，顺序固定（workbuddy > claude > cursor > codex > ...）。
+    用于 setup 不传 --tool 时的自动探测。
+    """
+    found = []
+    for tool in _all_tools():
+        d = _tool_dir(tool)
+        if os.path.isdir(d) and os.listdir(d):
+            found.append(tool)
+    return found
+
+
+def cmd_setup(args):
+    """新机器一键复原：init --from + apply --write + check。
+
+    对标 chezmoi `init --apply`，把三步合一步：
+      1. init <path> --from <url>      # clone canonical
+      2. apply --tool <t|all> --write   # 扇出到目标工具
+      3. check --tool <t|all>           # 体检 + drift 报告
+
+    `--tool` 可选：不传则自动探测本机已安装的 agent CLI。
+    `--canonical` 可选：默认 ~/.agent-dotfiles，避免每次写长路径。
+
+    用法：
+      agent-kit setup --from git@github.com:user/agent-dotfiles.git
+      agent-kit setup --from <url> --tool codex --write
+      agent-kit setup --from <url> --tool all --canonical ~/my-dotfiles --write --json
+    """
+    canonical = getattr(args, "canonical", None) or os.path.join(HOME, ".agent-dotfiles")
+    from_url = args.from_url
+    tools_arg = getattr(args, "tool", None)
+    dry = not getattr(args, "write", False)
+
+    if not from_url:
+        _err("setup 需要 --from <git-url>")
+        return 1
+
+    # 工具探测：不传 --tool 则自动探测
+    if tools_arg == "all" or tools_arg is None:
+        if tools_arg is None:
+            detected = _detect_installed_agents()
+            if not detected:
+                _err("未探测到任何已安装的 agent CLI（可用 --tool <name> 显式指定）")
+                return 1
+            tools = detected
+        else:
+            tools = _all_tools()
+    else:
+        tools = [tools_arg]
+
+    report = {
+        "canonical": canonical,
+        "from": from_url,
+        "tools": tools,
+        "dry_run": dry,
+        "steps": [],
+    }
+
+    # json 模式下静默中间步骤，只输出最终 JSON
+    def _say(msg):
+        if not getattr(args, "json", False):
+            print(msg)
+
+    # json 模式下吞掉子命令的 stdout，避免污染最终 JSON 输出
+    import io
+    from contextlib import redirect_stdout
+
+    def _run_sub(cmd_func, sub_args):
+        if getattr(args, "json", False):
+            with redirect_stdout(io.StringIO()):
+                return cmd_func(sub_args)
+        return cmd_func(sub_args)
+
+    # Step 1: init --from
+    _say("=" * 60)
+    _say("[setup] Step 1/3: init canonical from %s" % from_url)
+    _say("=" * 60)
+    if os.path.exists(canonical) and os.listdir(canonical):
+        # 已存在则 git pull 更新（幂等）
+        import subprocess as sp
+        r = sp.run(["git", "-C", canonical, "pull", "--quiet"],
+                   capture_output=True, text=True)
+        init_status = "updated" if r.returncode == 0 else "pull-failed"
+        report["steps"].append({"step": "init", "status": init_status,
+                                 "canonical": canonical})
+        if r.returncode != 0:
+            _err("git pull 失败: %s" % (r.stderr or "")[-200:])
+            _emit(args, "setup", canonical, report)
+            return 1
+    else:
+        os.makedirs(os.path.dirname(canonical) or ".", exist_ok=True)
+        init_args = argparse.Namespace(
+            path=canonical, **{"from": from_url}, json=False)
+        rc = _run_sub(cmd_init, init_args)
+        if rc != 0:
+            _emit(args, "setup", canonical, report)
+            return rc
+        report["steps"].append({"step": "init", "status": "cloned",
+                                 "canonical": canonical})
+
+    # 检查 .env 是否需要补全（缺密钥时给出明确清单，让 agent 去问用户）
+    env_path = os.path.join(canonical, ".env")
+    env_example = os.path.join(canonical, ".env.example")
+    if os.path.isfile(env_example) and not os.path.isfile(env_path):
+        shutil.copy(env_example, env_path)
+        _say("[setup] 已从 .env.example 复制 .env（待填密钥）")
+
+    # 扫描 .env 里仍是 ${...} 占位的 key —— 这些是 agent 需要去问用户的
+    missing_keys = []
+    if os.path.isfile(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if v.startswith("${") and v.endswith("}"):
+                    missing_keys.append(k)
+    if missing_keys:
+        report["missing_env_keys"] = missing_keys
+        report["env_action"] = ("这些密钥还是占位符，apply 前请逐个问用户要真实值并写入 "
+                                ".env；用 --json 时 agent 可直接读 missing_env_keys 字段")
+        _say("[setup] ⚠️  待填密钥（%d 个）: %s" % (len(missing_keys),
+                                              ", ".join(missing_keys)))
+        _say("[setup]    agent 应逐个问用户要值，写入 %s 后再 --write" % env_path)
+
+    # Step 2: apply --write（或 dry-run）
+    _say("=" * 60)
+    mode = "APPLY (write)" if not dry else "APPLY (dry-run)"
+    _say("[setup] Step 2/3: %s → tools=%s" % (mode, ",".join(tools)))
+    _say("=" * 60)
+    apply_rc = 0
+    for t in tools:
+        apply_args = argparse.Namespace(
+            canonical=canonical, tool=t, write=not dry,
+            upgrade=False, force=False, json=False)
+        rc = _run_sub(cmd_push, apply_args)
+        apply_rc |= rc
+        report["steps"].append({"step": "apply", "tool": t, "rc": rc})
+    if apply_rc != 0:
+        _err("apply 阶段有失败（见上）")
+        _emit(args, "setup", canonical, report)
+        return apply_rc
+
+    # Step 3: check（体检 + drift）
+    _say("=" * 60)
+    _say("[setup] Step 3/3: check canonical + drift")
+    _say("=" * 60)
+    check_rc = 0
+    for t in tools:
+        check_args = argparse.Namespace(
+            canonical=canonical, tool=t, json=False)
+        rc = _run_sub(cmd_check, check_args)
+        check_rc |= rc
+        report["steps"].append({"step": "check", "tool": t, "rc": rc})
+
+    report["overall_rc"] = check_rc
+    report["status"] = "ok" if check_rc == 0 else "has-drift-or-warnings"
+    _emit(args, "setup", canonical, report)
+    return 0 if check_rc == 0 else 1
+
+
 def cmd_sync(args):
     """把 skill 开发版同步到 canonical（封装"先删目标再拷"，避免 cp 嵌套）。
 
@@ -1036,7 +1201,7 @@ def cmd_sync(args):
 def main():
     ap = argparse.ArgumentParser(
         prog="agent-kit",
-        description="agent 配置生命周期管理（init / backup / apply / collect / check）",
+        description="agent 配置生命周期管理（init / backup / apply / collect / check / setup / sync）",
     )
     ap.add_argument("--json", action="store_true", help="输出 JSON 供 agent 消费")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1067,6 +1232,17 @@ def main():
     p_check.add_argument("--canonical", required=True)
     p_check.add_argument("--tool", default=None, choices=_all_tools() + ["all"],
                          help="指定工具则额外检查 drift（all=全部工具）")
+
+    p_setup = sub.add_parser("setup",
+                             help="新机器一键复原：init --from + apply + check（对标 chezmoi init --apply）")
+    p_setup.add_argument("--from", dest="from_url", required=True, metavar="GIT_URL",
+                         help="canonical 仓库的 git URL（必填）")
+    p_setup.add_argument("--canonical", default=None,
+                         help="canonical 路径（默认 ~/.agent-dotfiles）")
+    p_setup.add_argument("--tool", default=None, choices=_all_tools() + ["all"],
+                         help="目标工具；不传则自动探测本机已安装的 agent CLI")
+    p_setup.add_argument("--write", action="store_true",
+                         help="真正落盘（默认 dry-run）")
 
     p_sync = sub.add_parser("sync", help="同步 skill 开发版到 canonical（封装先删再拷）")
     p_sync.add_argument("--src", required=True, help="源 skill 目录（开发版）")
@@ -1114,6 +1290,10 @@ def main():
                 rc |= cmd_check(args)
             return rc
         return cmd_check(args)
+    if args.cmd == "setup":
+        if not getattr(args, "write", False) and not getattr(args, "json", False):
+            print("[setup] DRY-RUN（加 --write 落盘：init + apply + check）")
+        return cmd_setup(args)
     if args.cmd == "sync":
         if not args.write:
             print("[sync] DRY-RUN（加 --write 落盘）")

@@ -5,7 +5,37 @@ description: 融合"项目宪法生成、个性化研发流程、可携带环境
 
 # agent-dev-kit
 
-把"用 Agent 做开发"需要的规范、流程、skill、MCP 融合成一个**可携带的 canonical 仓库**，用五个命令管理全生命周期。
+把"用 Agent 做开发"需要的规范、流程、skill、MCP 融合成一个**可携带的 canonical 仓库**，用命令管理全生命周期。
+
+## 两步心智模型（对标 chezmoi `init --apply`）
+
+```
+Step 1: 装上 agent-dev-kit（Skill 工具或 /install，落盘 ~/.workbuddy/skills/）
+Step 2: agent-kit setup --from <git-url>   # 新机器一键复原
+```
+
+**用户只需要告诉 agent 一个 github 地址**，剩下的 agent 全搞定：
+1. agent 读 SKILL.md 知道跑 `setup --from <url>`
+2. setup 自动 clone canonical、自动探测本机已装的 agent CLI、扇出 + 体检
+3. 如果 canonical 里有 `.env.example`，setup 会自动复制成 `.env` 并扫描出**哪些密钥还是占位符**
+4. agent 读 JSON 报告里的 `missing_env_keys` 字段，**逐个问用户要真实值**，写入 `.env`
+5. 再跑一次 `setup --from <url> --write` 落盘完成
+
+`setup` 一条命令串联三步（对用户不可见）：clone canonical → 扇出到所有已安装的 agent CLI → 体检 + drift 报告。`--tool` 可选，不传则**自动探测**本机装了哪些工具。
+
+```bash
+# 最简：自动探测工具，dry-run 看计划
+agent-kit setup --from git@github.com:user/agent-dotfiles.git
+
+# 落盘
+agent-kit setup --from <url> --write
+
+# 指定工具 + 自定义 canonical 路径
+agent-kit setup --from <url> --tool codex --canonical ~/my-dotfiles --write
+
+# JSON 输出供 agent 消费（agent 读 missing_env_keys 去问用户密钥）
+agent-kit setup --from <url> --write --json
+```
 
 ## 核心理念
 
@@ -16,14 +46,13 @@ description: 融合"项目宪法生成、个性化研发流程、可携带环境
 
 **单一真相源 + 薄适配器**：规范、流程、skill、MCP 只在 canonical 仓库维护一处，每个工具只放薄指令文件指向它。
 
-## 五命令生命周期
+## 命令生命周期
 
-```
-init → backup → apply → [日常: collect / check] → [改 canonical 后: check → apply]
-```
+日常用 `setup` 一条命令；进阶场景才用细粒度命令：
 
 | 命令 | 做什么 | agent 何时调 |
 |---|---|---|
+| `setup --from <url>` | **新机器一键复原**：init + apply + check 串联，自动探测工具 | 用户说"新机器/换机器/复原/一键配置" |
 | `init <path>` | 初始化：从当前 WorkBuddy 快照生成 canonical 仓库 | 用户说"初始化/建环境/把当前配置带走" |
 | `backup --tool <t>` | 备份：把目标工具的现有配置备份到安全目录 | apply 前先备份，用户说"先备份一下" |
 | `apply --tool <t>` | 应用：把 canonical 配置应用到目标工具（幂等 SHA256 + .env 注入） | 用户说"装到 Claude/Cursor/Codex"或"扇出" |
@@ -32,7 +61,7 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 | `check [--tool]` | 检查：体检 canonical（质量+泄密+skill引用）；`--tool` 时附带 drift 检测 | 改了 canonical 后、apply 前、日常巡检 |
 | `sync --src <dev> --skill <n>` | 同步：把开发版 skill 干净同步到 canonical（先删再拷，沙箱兼容） | 改完 agent-dev-kit 代码后 |
 
-所有命令默认 dry-run（只打印计划），加 `--write` 才落盘。加 `--json` 输出结构化数据供 agent 消费。全部支持 `--tool all`。
+所有命令默认 dry-run（只打印计划），加 `--write` 才落盘。加 `--json` 输出结构化数据供 agent 消费。除 `setup` 外的命令都支持 `--tool all`。
 
 ## agent 操作手册
 
@@ -40,12 +69,12 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 
 | 场景 | 关键命令 | 注意 |
 |---|---|---|
+| 新机器复原 | `setup --from <url> --write` | 一条命令搞定，自动探测工具 |
 | 首次建环境 | `init` → `check` → `apply --tool all --write` | init 后填 `.env` 密钥 |
 | 换到新工具 | `backup --tool <t>` → `apply --tool <t>` (dry-run) → `--write` | review MCP 翻译是否覆盖已有 |
 | 装了新 skill | `collect --tool workbuddy` (dry-run) → `--write` → `apply --tool all` | review 回灌清单 |
 | 改了 canonical | `check` → `apply --tool all --write` → `check --tool all` | 确认全绿 |
 | 覆盖升级 | `apply --tool <t> --upgrade` (dry-run) → `--write` | upgrade 自动 backup，不动用户新增 |
-| 新机器复原 | `init <path> --from <git-url>` → `apply --tool all --write` | 从 GitHub clone canonical |
 
 ## 命令输出解读
 
@@ -62,7 +91,7 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 
 ## 项目宪法与流程生成
 
-五命令覆盖迁移。项目宪法和流程的生成用 `scaffold.py`：
+setup 一条命令覆盖新机器复原。项目宪法和流程的生成用 `scaffold.py`：
 
 - **AGENTS.md**：读 `references/agents-md-principles.md`（6 原则 + 审计清单），用 `assets/AGENTS.md.template` 骨架，向用户补齐技术栈/命令/禁区/Git 规范。
 - **flow.md**：读 `references/flow-template.md` + `workbuddy-skills-map.md`，按任务规模分级（小变更快路径 / 完整 Pipeline）。
