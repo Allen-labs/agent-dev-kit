@@ -1000,6 +1000,39 @@ def _all_tools():
     return list(TOOL_DIRS.keys())
 
 
+def cmd_sync(args):
+    """把 skill 开发版同步到 canonical（封装"先删目标再拷"，避免 cp 嵌套）。
+
+    用法：python agent-kit.py sync --src ~/.workbuddy/skills/agent-dev-kit \
+              --canonical ~/agent-dotfiles --skill agent-dev-kit
+    """
+    src = os.path.expanduser(args.src)
+    canonical = args.canonical
+    skill_name = args.skill
+    dst = os.path.join(canonical, "skills", skill_name)
+    if not os.path.isdir(src):
+        _err("源不存在: %s" % src)
+        return 1
+    if not os.path.isdir(canonical):
+        _err("canonical 不存在: %s" % canonical)
+        return 1
+    plan = {"src": src, "dst": dst, "action": "sync"}
+    if not args.write:
+        plan["action"] = "sync (dry-run)"
+        _emit(args, "sync", dst, plan)
+        return 0
+    # 先删目标再拷（沙箱兼容）
+    _remove_tree(dst)
+    shutil.copytree(src, dst,
+        ignore=shutil.ignore_patterns(".git", ".gitmodules", "__pycache__", "*.pyc"))
+    # 刷新 manifest
+    manifest = _load_manifest(canonical)
+    manifest["files"] = _scan_files(canonical)
+    _save_manifest(canonical, manifest)
+    _emit(args, "sync", dst, plan)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         prog="agent-kit",
@@ -1034,6 +1067,12 @@ def main():
     p_check.add_argument("--canonical", required=True)
     p_check.add_argument("--tool", default=None, choices=_all_tools() + ["all"],
                          help="指定工具则额外检查 drift（all=全部工具）")
+
+    p_sync = sub.add_parser("sync", help="同步 skill 开发版到 canonical（封装先删再拷）")
+    p_sync.add_argument("--src", required=True, help="源 skill 目录（开发版）")
+    p_sync.add_argument("--canonical", required=True)
+    p_sync.add_argument("--skill", required=True, help="skill 名（canonical/skills/ 下的目录名）")
+    p_sync.add_argument("--write", action="store_true", help="真正落盘（默认 dry-run）")
 
     args = ap.parse_args()
     if args.cmd == "init":
@@ -1075,6 +1114,10 @@ def main():
                 rc |= cmd_check(args)
             return rc
         return cmd_check(args)
+    if args.cmd == "sync":
+        if not args.write:
+            print("[sync] DRY-RUN（加 --write 落盘）")
+        return cmd_sync(args)
 
 
 if __name__ == "__main__":

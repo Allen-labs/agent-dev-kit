@@ -225,6 +225,38 @@ class TestApplyCollect(unittest.TestCase):
         rc2, _ = run_agent_kit("init", target, "--from", remote)
         self.assertNotEqual(rc2, 0, "非空目标应拒绝")
 
+    def test_sync_skill_to_canonical(self):
+        """sync 应把开发版 skill 干净同步到 canonical（无嵌套、无 __pycache__）。"""
+        # canonical 里放一个 v1 skill
+        sk = self._add_skill("sync-probe",
+                             "---\nname: sync-probe\ndescription: v1\n---\nv1\n")
+        # 开发版目录放 v2
+        dev = os.path.join(self.tmpdir, "dev-sync-probe")
+        os.makedirs(os.path.join(dev, "scripts", "__pycache__"))
+        with open(os.path.join(dev, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: sync-probe\ndescription: v2\n---\nv2\n")
+        with open(os.path.join(dev, "scripts", "x.py"), "w") as f:
+            f.write("# x\n")
+        with open(os.path.join(dev, "scripts", "__pycache__", "x.pyc"), "wb") as f:
+            f.write(b"\x00")
+        # sync dry-run
+        rc, out = run_agent_kit("sync", "--src", dev,
+                                "--canonical", self.canonical,
+                                "--skill", "sync-probe", env=self.env)
+        self.assertEqual(rc, 0)
+        self.assertIn("DRY-RUN", out)
+        # 真同步
+        rc, _ = run_agent_kit("sync", "--src", dev,
+                              "--canonical", self.canonical,
+                              "--skill", "sync-probe", "--write", env=self.env)
+        self.assertEqual(rc, 0)
+        dst = os.path.join(self.canonical, "skills", "sync-probe")
+        self.assertIn("v2", open(os.path.join(dst, "SKILL.md")).read())
+        # 无嵌套
+        self.assertFalse(os.path.isdir(os.path.join(dst, "sync-probe")))
+        # 无 __pycache__
+        self.assertFalse(os.path.isdir(os.path.join(dst, "scripts", "__pycache__")))
+
     def test_apply_tool_all(self):
         """apply --tool all 应遍历分发到全部 6 个工具（regression: SKILL.md 声称但缺失）。"""
         env = dict(self.env)

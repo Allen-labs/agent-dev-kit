@@ -30,59 +30,28 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 | `apply --tool <t> --upgrade` | 升级：先自动 backup 再覆盖 canonical 管理的已变更文件，**不动**工具里用户自己新增的 skill | 用户说"已配置过，想覆盖升级"或"更新到最新版" |
 | `collect --tool <t>` | 收集：把工具新装的 skill 回灌到 canonical | 用户说"我在 workbuddy 装了新 skill"或"回灌" |
 | `check [--tool]` | 检查：体检 canonical（质量+泄密+skill引用）；`--tool` 时附带 drift 检测 | 改了 canonical 后、apply 前、日常巡检 |
+| `sync --src <dev> --skill <n>` | 同步：把开发版 skill 干净同步到 canonical（先删再拷，沙箱兼容） | 改完 agent-dev-kit 代码后 |
 
-所有命令默认 dry-run（只打印计划），加 `--write` 才落盘。加 `--json` 输出结构化数据供 agent 消费。
+所有命令默认 dry-run（只打印计划），加 `--write` 才落盘。加 `--json` 输出结构化数据供 agent 消费。全部支持 `--tool all`。
 
-## agent 操作手册（何时调什么）
+## agent 操作手册
 
-### 场景 1：用户第一次建环境
-```
-1. agent 调: python agent-kit.py init ~/agent-dotfiles
-2. agent 读生成的 AGENTS.md / flow.md，和用户确认规范
-3. agent 调: python agent-kit.py check --canonical ~/agent-dotfiles  # 检查
-4. 确认无误后: python agent-kit.py apply --canonical ~/agent-dotfiles --tool workbuddy --write
-```
+通用流程：**dry-run → review → --write → check**。场景差异：
 
-### 场景 2：换到 Claude Code
-```
-1. agent 调: python agent-kit.py backup --tool claude              # 先备份现有配置
-2. agent 调: python agent-kit.py apply --canonical ~/agent-dotfiles --tool claude (dry-run)
-3. agent review 计划（推哪些 skill、MCP 怎么翻译、CLAUDE.md 会不会覆盖已有）
-4. 用户确认后: --write 落盘
-5. agent 调: python agent-kit.py check --canonical ~/agent-dotfiles --tool claude  # 确认同步
-```
-
-### 场景 3：用户在 WorkBuddy 装了新 skill
-```
-1. agent 调: python agent-kit.py collect --canonical ~/agent-dotfiles --tool workbuddy (dry-run)
-2. agent review 回灌清单（哪些是真好 skill、哪些是临时试验）
-3. 确认后 --write
-4. agent 调: python agent-kit.py apply --canonical ~/agent-dotfiles --tool claude --write  # 同步到其他工具
-```
-
-### 场景 4：改了 canonical 里的 skill
-```
-1. agent 调: python agent-kit.py check --canonical ~/agent-dotfiles  # 确认没改坏
-2. agent 调: python agent-kit.py apply --canonical ~/agent-dotfiles --tool all --write  # 推到所有工具
-3. agent 调: python agent-kit.py check --canonical ~/agent-dotfiles --tool workbuddy  # 确认 synced
-```
-
-### 场景 5：已配置过，想覆盖升级
-```
-1. agent 调: python agent-kit.py apply --canonical ~/agent-dotfiles --tool claude --upgrade (dry-run)
-   # upgrade 模式会自动先 backup，再覆盖 canonical 管理的已变更文件，不动你自己在工具里新增的 skill
-2. agent review 计划（哪些是 modified、backup 在哪）
-3. 用户确认后: --write 落盘
-4. 如需回滚: 从 plan["backed_up"] 路径恢复
-```
+| 场景 | 关键命令 | 注意 |
+|---|---|---|
+| 首次建环境 | `init` → `check` → `apply --tool all --write` | init 后填 `.env` 密钥 |
+| 换到新工具 | `backup --tool <t>` → `apply --tool <t>` (dry-run) → `--write` | review MCP 翻译是否覆盖已有 |
+| 装了新 skill | `collect --tool workbuddy` (dry-run) → `--write` → `apply --tool all` | review 回灌清单 |
+| 改了 canonical | `check` → `apply --tool all --write` → `check --tool all` | 确认全绿 |
+| 覆盖升级 | `apply --tool <t> --upgrade` (dry-run) → `--write` | upgrade 自动 backup，不动用户新增 |
+| 新机器复原 | `init <path> --from <git-url>` → `apply --tool all --write` | 从 GitHub clone canonical |
 
 ## 命令输出解读
 
-脚本输出 `--json` 时，agent 应关注：
-- `backup`: `data.files` = 备份了哪些文件、`data.path` = 备份在哪
-- `apply`: `data.summary` = "N new, M modified, K skipped"——判断是否需要重推；`data.backed_up` = upgrade 模式的备份路径（回滚用）
-- `collect`: `data.collected` = 回灌了哪些 skill——决定是否要 review
-- `check`: `data.overall` = "ok" 才能安全 apply；`data.drift.drifted` > 0 说明该工具不一致
+- `apply`: `data.summary` = "N new, M modified, K skipped"；`data.backed_up` = 回滚路径
+- `collect`: `data.collected` / `data.updated` = 回灌了什么
+- `check`: `data.overall` = "ok" 才能安全 apply；`data.drift.drifted` > 0 说明不一致
 
 ## 地基资产分发（apply 时自动做）
 
@@ -91,26 +60,15 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 - `agents/` → `.claude/agents/`（通用子代理：code-reviewer / verification-runner；方法论归 `subagent-driven-development` skill）
 - `spec-templates/` → 项目 `.agents/spec-templates/`（由 scaffold 分发，供 `specs/<feature>/` 落盘）
 
-## 三模式路由（项目宪法 / 个性化流程 / 迁移）
+## 项目宪法与流程生成
 
-五命令覆盖迁移全生命周期。项目宪法和流程的生成仍用原模式：
+五命令覆盖迁移。项目宪法和流程的生成用 `scaffold.py`：
 
-### 模式 A · init（项目宪法）
-1. 读 `references/agents-md-principles.md` —— 6 条原则 + 审计清单。
-2. 读 `references/folder-structure.md` —— `.agents/` 目录布局。
-3. 用 `scripts/scaffold.py`（默认 dry-run，`--write` 才落盘）。模板从 `assets/AGENTS.md.template` 单一来源读取。
-4. 用模板作骨架，向用户补齐：技术栈、构建/测试命令、禁区、Git 规范。
-5. 生成 `flow.md`（模式 B 初稿），用审计清单自检后交付。
+- **AGENTS.md**：读 `references/agents-md-principles.md`（6 原则 + 审计清单），用 `assets/AGENTS.md.template` 骨架，向用户补齐技术栈/命令/禁区/Git 规范。
+- **flow.md**：读 `references/flow-template.md` + `workbuddy-skills-map.md`，按任务规模分级（小变更快路径 / 完整 Pipeline）。
+- **`.agents/` 结构**：读 `references/folder-structure.md`。
 
-### 模式 B · flow（个性化研发流程）
-1. 读 `references/flow-template.md` + `references/workbuddy-skills-map.md`。
-2. `flow.md` 是 WorkBuddy 内置 skill 的"调用说明书"，写明本项目走哪几步。
-3. 流程按任务规模分级：小型变更走快路径，非平凡功能走完整 Pipeline。
-
-### 模式 C · migrate（可携带环境迁移）
-完全由五命令覆盖（见上方"agent 操作手册"）。`agent-kit.py init` 从当前环境快照生成 canonical。
-
-> 注：`bootstrap.py` / `doctor.py` / `scan_env.py` 已删除（功能合并进 `agent-kit.py`，git 历史可恢复）。统一用 `agent-kit.py`。
+> `bootstrap.py` / `doctor.py` / `scan_env.py` 已删除，统一用 `agent-kit.py`。
 
 ## 何时读什么（渐进披露）
 
@@ -124,28 +82,11 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 
 ## 安全与纪律
 
-- 密钥只进 `.env`（canonical 根目录，gitignore），绝不进仓库或 AGENTS.md。
-- `apply` 时从 `.env` 注入真实密钥到目标工具配置；canonical 里的 `mcp.servers.json` 永远保留 `${}` 占位。
-- 脚手架脚本：默认 dry-run；写入须显式 `--write`；不越界写 cwd 之外；不覆盖已有文件（除非 `--force`）。
-- AGENTS.md < 150 行；每条规则必须"有用且具体"，否则 agent 会判断无关而忽略。
-- **apply 到真实 home 目录会改动现有环境**——务必先 dry-run 确认，agent 绝不主动对真实目录 `--write`。
-
-## canonical 同步约定（踩坑固化）
-
-**往已存在的目录同步（如把 skill 开发版同步进 canonical）时，禁止直接 `cp -r src dst`**——
-POSIX 语义下 dst 已存在会生成 `dst/src/` 嵌套，且顶层文件不会被更新。
-正确做法（三选一）：
-
-```bash
-# ① 先删目标再拷（最常用）
-rm -rf dst && cp -r src dst
-# ② rsync 同步（推荐，--delete 可清理目标多余文件）
-rsync -a --delete src/ dst/
-# ③ 沙箱环境用 python（os 层删除，绕开回收站钩子）
-shutil.copytree(src, dst, dirs_exist_ok=True)
-```
-
-同步后必须验证：`grep` 新函数名 / 新文件存在 / `git status` 干净——防止"拷了但没更新"的静默失败。
+- 密钥只进 `.env`（gitignore），`apply` 时注入；canonical 里永远 `${}` 占位。
+- 默认 dry-run；`--write` 才落盘；不越界写 cwd 之外。
+- AGENTS.md < 150 行；每条规则"有用且具体"。
+- **apply 到真实 home 会改现有环境**——先 dry-run，agent 绝不主动 `--write`。
+- canonical 同步约定见 `references/sync-conventions.md`（给开发者，非 agent）。
 
 ## 交付物清单
 
