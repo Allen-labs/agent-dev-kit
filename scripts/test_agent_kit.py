@@ -184,6 +184,43 @@ class TestApplyCollect(unittest.TestCase):
                                         "scripts", "__pycache__")),
             "collect 不应带 __pycache__ 垃圾")
 
+    def test_apply_distributes_commands(self):
+        """apply 应把 commands 资产分发到各工具（claude/cursor/codex）。"""
+        # init 已把 assets/commands 复制进 canonical
+        cmds = os.path.join(self.canonical, "commands")
+        self.assertTrue(os.path.isdir(cmds), "init 应带 commands 资产")
+        # claude → .claude/commands/
+        env = dict(self.env)
+        env["AGENT_KIT_TOOL_DIR_CLAUDE"] = self.fake_tool
+        rc, _ = run_agent_kit("apply", "--canonical", self.canonical,
+                              "--tool", "claude", "--write", env=env)
+        self.assertEqual(rc, 0)
+        dst = os.path.join(self.fake_tool, "commands")
+        self.assertTrue(os.path.isfile(os.path.join(dst, "commit.md")),
+                        "claude 应有 commit 命令")
+        self.assertTrue(os.path.isfile(os.path.join(dst, "review.md")))
+        self.assertTrue(os.path.isfile(os.path.join(dst, "test.md")))
+
+    def test_apply_rules_to_cursor_mdc(self):
+        """canonical/rules 的作用域规则应翻译为 .cursor/rules/*.mdc（scope→globs）。"""
+        # canonical/rules 加一个作用域规则
+        os.makedirs(os.path.join(self.canonical, "rules"), exist_ok=True)
+        with open(os.path.join(self.canonical, "rules", "frontend.md"),
+                  "w", encoding="utf-8") as f:
+            f.write('---\nname: frontend\ndescription: React 组件约定\n'
+                    'scope: "**/*.{ts,tsx}"\n---\n\n- 函数组件优先\n')
+        env = dict(self.env)
+        fake_cursor = os.path.join(self.tmpdir, "fake-cursor")
+        env["AGENT_KIT_TOOL_DIR_CURSOR"] = fake_cursor
+        rc, _ = run_agent_kit("apply", "--canonical", self.canonical,
+                              "--tool", "cursor", "--write", env=env)
+        self.assertEqual(rc, 0)
+        mdc = os.path.join(fake_cursor, "rules", "frontend.mdc")
+        self.assertTrue(os.path.isfile(mdc), "作用域规则应翻译成 .mdc")
+        content = open(mdc, encoding="utf-8").read()
+        self.assertIn('globs: ["**/*.{ts,tsx}"]', content,
+                      "scope 应翻译为 globs")
+
     def test_backup_creates_backup_dir(self):
         """backup 应该创建备份目录（用 fake 工具目录，隔离真实环境）。"""
         # fake tool 里放点内容

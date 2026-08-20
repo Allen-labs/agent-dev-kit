@@ -248,7 +248,7 @@ def _merge_toml(dst, new_sections, args, plan, label):
 
 def _instruction_file(tool, canonical):
     """返回目标工具的指令文件路径 + 内容。
-    这是修缺口 1 的核心：apply 时真正创建 CLAUDE.md / .cursorrules 等。"""
+    apply 时创建 CLAUDE.md / .cursor/rules/global.mdc / AGENTS.md 等。"""
     ag = os.path.join(canonical, "AGENTS.md")
     if not os.path.isfile(ag):
         return None, None
@@ -256,12 +256,90 @@ def _instruction_file(tool, canonical):
     if tool == "claude":
         return os.path.join(tool_dir, "CLAUDE.md"), "@%s" % ag.replace("\\", "/")
     if tool == "cursor":
-        return os.path.join(tool_dir, ".cursorrules"), "See: %s/AGENTS.md" % canonical.replace("\\", "/")
+        # Cursor 现行标准是 .cursor/rules/*.mdc（.cursorrules 已 legacy）
+        dst = os.path.join(tool_dir, "rules", "global.mdc")
+        content = (
+            "---\n"
+            "description: 全局规则（始终应用，指向 canonical AGENTS.md）\n"
+            "alwaysApply: true\n"
+            "---\n\n"
+            "See: %s/AGENTS.md\n" % canonical.replace("\\", "/")
+        )
+        return dst, content
     if tool == "codex":
         return os.path.join(tool_dir, "AGENTS.md"), open(ag, encoding="utf-8").read()
     if tool in ("opencode", "zed", "workbuddy"):
         return os.path.join(tool_dir, "AGENTS.md"), open(ag, encoding="utf-8").read()
     return None, None
+
+
+# ─── commands / rules 分发（地基资产 → 各工具）──────────
+
+# 各工具的自定义命令存放子目录（相对 tool_dir）
+COMMANDS_DIRS = {
+    "claude": "commands",      # .claude/commands/*.md
+    "cursor": "commands",      # .cursor/commands/*.md
+    "codex": "prompts",        # .codex/prompts/*.md
+}
+
+
+def _asset_dir(canonical, name):
+    """资产目录：canonical 优先（用户可改），fallback skill 内置 assets。"""
+    p = os.path.join(canonical, name)
+    if os.path.isdir(p):
+        return p
+    p2 = os.path.join(ASSETS_DIR, name)
+    return p2 if os.path.isdir(p2) else None
+
+
+def _apply_commands(canonical, tool_dir, tool, args, plan):
+    """把 commands 资产分发到各工具（claude/cursor 的 commands、codex 的 prompts）。"""
+    sub = COMMANDS_DIRS.get(tool)
+    if not sub:
+        return
+    src_dir = _asset_dir(canonical, "commands")
+    if not src_dir:
+        return
+    dst_dir = os.path.join(tool_dir, sub)
+    for fn in sorted(os.listdir(src_dir)):
+        src = os.path.join(src_dir, fn)
+        if not os.path.isfile(src) or not fn.endswith(".md"):
+            continue
+        _write_or_backup(os.path.join(dst_dir, fn),
+                         open(src, encoding="utf-8").read(),
+                         args, plan, "commands/%s" % fn)
+
+
+def _apply_rules(canonical, tool_dir, tool, args, plan):
+    """作用域规则 → Cursor .cursor/rules/*.mdc（frontmatter scope 翻译为 globs）。
+    global.mdc 由 _instruction_file 生成，这里只处理 canonical/rules/ 下的作用域规则。"""
+    if tool != "cursor":
+        return
+    src_rules = os.path.join(canonical, "rules")
+    if not os.path.isdir(src_rules):
+        return
+    dst_rules = os.path.join(tool_dir, "rules")
+    for fn in sorted(os.listdir(src_rules)):
+        if not fn.endswith(".md") or fn == "README.md":
+            continue
+        src = os.path.join(src_rules, fn)
+        txt = open(src, encoding="utf-8").read()
+        body, meta = txt, {}
+        if txt.startswith("---"):
+            end = txt.find("---", 3)
+            if end != -1:
+                fm, body = txt[3:end], txt[end + 3:].lstrip()
+                for line in fm.splitlines():
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        meta[k.strip()] = v.strip().strip('"').strip("'")
+        scope = meta.get("scope", "**/*")
+        desc = meta.get("description", fn[:-3])
+        name = meta.get("name", fn[:-3])
+        mdc = ("---\ndescription: %s\nglobs: [\"%s\"]\nalwaysApply: false\n---\n\n%s"
+               % (desc, scope, body))
+        _write_or_backup(os.path.join(dst_rules, name + ".mdc"),
+                         mdc, args, plan, "rules/%s" % fn)
 
 
 def _remove_tree(path):
@@ -370,6 +448,16 @@ def cmd_init(args):
         os.makedirs(dst_ad, exist_ok=True)
         for fn in os.listdir(adir):
             shutil.copy(os.path.join(adir, fn), os.path.join(dst_ad, fn))
+
+    # 地基资产同步：commands / rules / spec-templates（出厂默认 → canonical）
+    for extra in ("commands", "rules", "spec-templates"):
+        sdir = os.path.join(ASSETS_DIR, extra)
+        if os.path.isdir(sdir):
+            ddir = os.path.join(dest, extra)
+            os.makedirs(ddir, exist_ok=True)
+            for fn in os.listdir(sdir):
+                shutil.copy(os.path.join(sdir, fn), os.path.join(ddir, fn))
+            changes["files"].append(extra + "/")
 
     manifest = {"version": 1, "files": _scan_files(dest), "tools": {}}
     _save_manifest(dest, manifest)
@@ -480,6 +568,9 @@ def cmd_push(args):
             if os.path.isfile(src):
                 _write_or_backup(dst, open(src, encoding="utf-8").read(),
                                  args, plan, "hooks/%s" % fn)
+
+    _apply_commands(canonical, tool_dir, tool, args, plan)
+    _apply_rules(canonical, tool_dir, tool, args, plan)
 
     manifest["files"] = current
     if not dry:

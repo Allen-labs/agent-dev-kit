@@ -15,6 +15,7 @@
 """
 import argparse
 import os
+import shutil
 import sys
 
 TEMPLATES = {
@@ -116,6 +117,21 @@ def main():
             continue
         plan.append((target, exists, content))
 
+    # spec 工作流模板（spec.md / plan.md）→ .agents/spec-templates/
+    spec_src = os.path.join(ASSETS_DIR, "spec-templates")
+    spec_files = []
+    if os.path.isdir(spec_src):
+        for fn in sorted(os.listdir(spec_src)):
+            if fn.endswith(".template"):
+                spec_files.append(fn)
+    spec_plan = []
+    for fn in spec_files:
+        target = os.path.join(repo, ".agents", "spec-templates", fn)
+        if is_outside(repo, target) and not args.allow_outside:
+            blocked.append(target)
+            continue
+        spec_plan.append((target, os.path.exists(target), fn))
+
     if blocked:
         print("[scaffold] 被阻止（安全闸门）：")
         for b in blocked:
@@ -123,7 +139,7 @@ def main():
 
     if not args.write:
         print("[scaffold] DRY-RUN（不落盘）。将要创建/更新：")
-        for target, exists, _ in plan:
+        for target, exists, _ in plan + [(t, e, f) for t, e, f in spec_plan]:
             print(f"  {'更新' if exists else '创建'}  {target}")
         print("\n加 --write 才真正落盘。")
         return
@@ -132,6 +148,10 @@ def main():
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "w", encoding="utf-8") as f:
             f.write(content)
+        print(f"  {'更新' if exists else '创建'}  {target}")
+    for target, exists, fn in spec_plan:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy(os.path.join(spec_src, fn), target)
         print(f"  {'更新' if exists else '创建'}  {target}")
     print("[scaffold] done.")
 
