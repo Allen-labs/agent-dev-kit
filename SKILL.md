@@ -88,6 +88,7 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 
 - `commands/` → `.claude/commands/`、`.cursor/commands/`、`.codex/prompts/`（斜杠命令开箱即用：commit/review/test）
 - `rules/` → `.cursor/rules/*.mdc`（作用域规则的 `scope` 翻译为 `globs`；`global.mdc` 始终指向 AGENTS.md，替代 legacy `.cursorrules`）
+- `agents/` → `.claude/agents/`（通用子代理：code-reviewer / verification-runner；方法论归 `subagent-driven-development` skill）
 - `spec-templates/` → 项目 `.agents/spec-templates/`（由 scaffold 分发，供 `specs/<feature>/` 落盘）
 
 ## 三模式路由（项目宪法 / 个性化流程 / 迁移）
@@ -162,6 +163,7 @@ shutil.copytree(src, dst, dirs_exist_ok=True)
 ├── commands/                   # 斜杠命令资产（commit/review/test，apply 分发）
 ├── rules/                      # 作用域规则资产（frontmatter 声明 scope，极简）
 ├── spec-templates/             # spec/plan 工作流模板（scaffold 分发给项目）
+├── agents/                     # 通用子代理资产（code-reviewer/verification-runner）
 ├── .sync/manifest.json         # 同步状态（SHA256，运行时生成）
 ├── .env                        # 密钥（gitignore，不入仓库）
 └── .env.example                # 密钥占位模板（入仓库）

@@ -201,6 +201,22 @@ class TestApplyCollect(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(dst, "review.md")))
         self.assertTrue(os.path.isfile(os.path.join(dst, "test.md")))
 
+    def test_apply_distributes_agents(self):
+        """apply 应把 agents 子代理资产分发到 Claude 的 .claude/agents/。"""
+        # init 已把 assets/agents 复制进 canonical
+        agents = os.path.join(self.canonical, "agents")
+        self.assertTrue(os.path.isdir(agents), "init 应带 agents 资产")
+        env = dict(self.env)
+        env["AGENT_KIT_TOOL_DIR_CLAUDE"] = self.fake_tool
+        rc, _ = run_agent_kit("apply", "--canonical", self.canonical,
+                              "--tool", "claude", "--write", env=env)
+        self.assertEqual(rc, 0)
+        dst = os.path.join(self.fake_tool, "agents")
+        self.assertTrue(os.path.isfile(os.path.join(dst, "code-reviewer.md")),
+                        "claude 应有 code-reviewer 子代理")
+        self.assertTrue(os.path.isfile(os.path.join(dst, "verification-runner.md")),
+                        "claude 应有 verification-runner 子代理")
+
     def test_apply_rules_to_cursor_mdc(self):
         """canonical/rules 的作用域规则应翻译为 .cursor/rules/*.mdc（scope→globs）。"""
         # canonical/rules 加一个作用域规则

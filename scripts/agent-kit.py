@@ -282,6 +282,11 @@ COMMANDS_DIRS = {
     "codex": "prompts",        # .codex/prompts/*.md
 }
 
+# 各工具的子代理存放子目录（相对 tool_dir）
+AGENTS_DIRS = {
+    "claude": "agents",        # .claude/agents/*.md
+}
+
 
 def _asset_dir(canonical, name):
     """资产目录：canonical 优先（用户可改），fallback skill 内置 assets。"""
@@ -308,6 +313,24 @@ def _apply_commands(canonical, tool_dir, tool, args, plan):
         _write_or_backup(os.path.join(dst_dir, fn),
                          open(src, encoding="utf-8").read(),
                          args, plan, "commands/%s" % fn)
+
+
+def _apply_agents(canonical, tool_dir, tool, args, plan):
+    """把 agents 子代理资产分发到各工具（当前只支持 Claude 的 .claude/agents/）。"""
+    sub = AGENTS_DIRS.get(tool)
+    if not sub:
+        return
+    src_dir = _asset_dir(canonical, "agents")
+    if not src_dir:
+        return
+    dst_dir = os.path.join(tool_dir, sub)
+    for fn in sorted(os.listdir(src_dir)):
+        src = os.path.join(src_dir, fn)
+        if not os.path.isfile(src) or not fn.endswith(".md"):
+            continue
+        _write_or_backup(os.path.join(dst_dir, fn),
+                         open(src, encoding="utf-8").read(),
+                         args, plan, "agents/%s" % fn)
 
 
 def _apply_rules(canonical, tool_dir, tool, args, plan):
@@ -449,8 +472,8 @@ def cmd_init(args):
         for fn in os.listdir(adir):
             shutil.copy(os.path.join(adir, fn), os.path.join(dst_ad, fn))
 
-    # 地基资产同步：commands / rules / spec-templates（出厂默认 → canonical）
-    for extra in ("commands", "rules", "spec-templates"):
+    # 地基资产同步：commands / rules / spec-templates / agents（出厂默认 → canonical）
+    for extra in ("commands", "rules", "spec-templates", "agents"):
         sdir = os.path.join(ASSETS_DIR, extra)
         if os.path.isdir(sdir):
             ddir = os.path.join(dest, extra)
@@ -571,6 +594,7 @@ def cmd_push(args):
 
     _apply_commands(canonical, tool_dir, tool, args, plan)
     _apply_rules(canonical, tool_dir, tool, args, plan)
+    _apply_agents(canonical, tool_dir, tool, args, plan)
 
     manifest["files"] = current
     if not dry:
