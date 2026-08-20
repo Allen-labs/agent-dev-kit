@@ -413,11 +413,30 @@ def _backup(dst):
 # ─── init ───────────────────────────────────────────────
 
 def cmd_init(args):
-    """初始化 canonical 仓库：从当前 WorkBuddy 环境快照。"""
+    """初始化 canonical 仓库。
+
+    - 默认：从当前 WorkBuddy 环境快照生成（含全部地基资产）
+    - --from <git-url>：从远程 canonical 引导下载（新机器复原，clone 现成仓库）
+    """
     dest = args.path
     if os.path.exists(dest) and os.listdir(dest):
         _err("目标已存在且非空: %s" % dest)
         return 1
+    from_url = getattr(args, "from", None)
+    if from_url:
+        import subprocess as sp
+        r = sp.run(["git", "clone", "--quiet", from_url, dest],
+                   capture_output=True, text=True)
+        if r.returncode != 0:
+            _err("引导下载失败（git clone）: %s" % (r.stderr or "")[-300:])
+            return 1
+        # 若远程仓库没有 manifest（非 agent-kit 生成），补一份
+        if not os.path.isfile(os.path.join(dest, ".sync", "manifest.json")):
+            os.makedirs(os.path.join(dest, ".sync"), exist_ok=True)
+            _save_manifest(dest, {"version": 1, "files": _scan_files(dest), "tools": {}})
+        changes = {"skills": 0, "mcp": 0, "files": ["<clone from %s>" % from_url]}
+        _emit(args, "init", dest, changes)
+        return 0
     os.makedirs(dest, exist_ok=True)
     changes = {"skills": 0, "mcp": 0, "files": []}
 
@@ -989,8 +1008,10 @@ def main():
     ap.add_argument("--json", action="store_true", help="输出 JSON 供 agent 消费")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p_init = sub.add_parser("init", help="初始化 canonical 仓库")
+    p_init = sub.add_parser("init", help="初始化 canonical 仓库（默认快照；--from 从远程引导）")
     p_init.add_argument("path", help="canonical 仓库路径")
+    p_init.add_argument("--from", default=None, metavar="GIT_URL",
+                        help="从远程 canonical 仓库 clone 引导（新机器复原）")
 
     p_backup = sub.add_parser("backup", help="备份目标工具的现有配置")
     p_backup.add_argument("--tool", required=True, choices=_all_tools() + ["all"])

@@ -201,6 +201,30 @@ class TestApplyCollect(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(dst, "review.md")))
         self.assertTrue(os.path.isfile(os.path.join(dst, "test.md")))
 
+    def test_init_from_url(self):
+        """init --from 应从远程/本地 git 仓库引导下载 canonical（新机器复原）。"""
+        # 建一个"远程"仓库（本地 git 仓库模拟），放一个文件 + commit
+        remote = os.path.join(self.tmpdir, "remote-canonical")
+        os.makedirs(os.path.join(remote, "skills", "seed"))
+        with open(os.path.join(remote, "skills", "seed", "SKILL.md"), "w") as f:
+            f.write("---\nname: seed\ndescription: seed\n---\n# seed\n")
+        with open(os.path.join(remote, "AGENTS.md"), "w") as f:
+            f.write("# Demo\n\n## Commands\n- `test`\n")
+        subprocess.run(["git", "init", "-q", remote], check=True)
+        subprocess.run(["git", "-C", remote, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", remote, "-c", "user.name=t", "-c",
+                        "user.email=t@t", "commit", "-qm", "seed"], check=True)
+        # init --from 到新目录
+        target = os.path.join(self.tmpdir, "bootstrapped")
+        rc, out = run_agent_kit("init", target, "--from", remote)
+        self.assertEqual(rc, 0, "init --from 应成功: " + out)
+        self.assertTrue(os.path.isfile(os.path.join(target, "AGENTS.md")),
+                        "引导下载应包含远程文件")
+        self.assertTrue(os.path.isfile(os.path.join(target, "skills", "seed", "SKILL.md")))
+        # 目标非空应拒绝
+        rc2, _ = run_agent_kit("init", target, "--from", remote)
+        self.assertNotEqual(rc2, 0, "非空目标应拒绝")
+
     def test_apply_tool_all(self):
         """apply --tool all 应遍历分发到全部 6 个工具（regression: SKILL.md 声称但缺失）。"""
         env = dict(self.env)
