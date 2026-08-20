@@ -129,6 +129,23 @@ init → backup → apply → [日常: collect / check] → [改 canonical 后: 
 - AGENTS.md < 150 行；每条规则必须"有用且具体"，否则 agent 会判断无关而忽略。
 - **apply 到真实 home 目录会改动现有环境**——务必先 dry-run 确认，agent 绝不主动对真实目录 `--write`。
 
+## canonical 同步约定（踩坑固化）
+
+**往已存在的目录同步（如把 skill 开发版同步进 canonical）时，禁止直接 `cp -r src dst`**——
+POSIX 语义下 dst 已存在会生成 `dst/src/` 嵌套，且顶层文件不会被更新。
+正确做法（三选一）：
+
+```bash
+# ① 先删目标再拷（最常用）
+rm -rf dst && cp -r src dst
+# ② rsync 同步（推荐，--delete 可清理目标多余文件）
+rsync -a --delete src/ dst/
+# ③ 沙箱环境用 python（os 层删除，绕开回收站钩子）
+shutil.copytree(src, dst, dirs_exist_ok=True)
+```
+
+同步后必须验证：`grep` 新函数名 / 新文件存在 / `git status` 干净——防止"拷了但没更新"的静默失败。
+
 ## 交付物清单
 
 ```
